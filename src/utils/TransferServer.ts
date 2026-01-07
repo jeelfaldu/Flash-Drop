@@ -3,29 +3,63 @@ import RNFS from 'react-native-fs';
 import { Buffer } from 'buffer';
 import { saveHistoryItem } from './HistoryService';
 
+export type ServerStatus = {
+  type: 'client_connected' | 'progress' | 'complete' | 'error';
+  clientAddress?: string;
+  fileProgress?: {
+    name: string;
+    percent: number;
+    sent: number;
+    total: number;
+  };
+  message?: string;
+}
+
 export class TransferServer {
     server: any;
     filesToSend: any[] = [];
+  statusCallback?: (status: ServerStatus) => void;
+  private connectedClients = new Set<string>();
     
-    start(port = 8888, files: any[]) {
+  start(port = 8888, files: any[], onStatus?: (status: ServerStatus) => void) {
         this.filesToSend = files;
+    this.statusCallback = onStatus;
         
         console.log(`[TransferServer] Starting on 0.0.0.0:${port}`);
         
         this.server = TcpSocket.createServer((socket) => {
-            console.log('[TransferServer] Client connected from:', socket.address());
+          const address: any = socket.address();
+          const clientIp = typeof address === 'string' ? address : address.address;
+          console.log('[TransferServer] Client connected from:', clientIp);
+
+          if (this.statusCallback && !this.connectedClients.has(clientIp)) {
+            this.connectedClients.add(clientIp);
+            this.statusCallback({
+              type: 'client_connected',
+              clientAddress: clientIp
+            });
+            // Clear from set after some time if we want to allow re-entry, 
+            // but for a single session this is safer.
+          }
             
             socket.on('data', async (data) => {
                 const msg = data.toString().trim();
                 console.log('Received:', msg);
                 
                 if (msg === 'GET_METADATA') {
-                    const metadata = JSON.stringify(this.filesToSend.map(f => ({
+                  const metadata = JSON.stringify(this.filesToSend.map(f => {
+                    let numericSize = 0;
+                    if (typeof f.rawSize === 'number') numericSize = f.rawSize;
+                    else if (typeof f.size === 'number') numericSize = f.size;
+                    else if (typeof f.size === 'string') numericSize = parseFloat(f.size.replace(/[^0-9.]/g, '')) * (f.size.includes('GB') ? 1024 * 1024 * 1024 : f.size.includes('MB') ? 1024 * 1024 : f.size.includes('KB') ? 1024 : 1);
+
+                    return {
                         name: f.name,
                         type: f.type,
-                        size: f.size,
-                        uri: f.uri // URI usage might differ on receiver
-                    })));
+                      size: numericSize,
+                      uri: f.uri
+                    };
+                  }));
                     socket.write(metadata + "\n<EOF>\n");
                 } 
                 else if (msg.startsWith('GET_FILE:')) {
@@ -36,6 +70,9 @@ export class TransferServer {
 
             socket.on('error', (error) => {
                 console.log('Server Socket Error:', error);
+              if (this.statusCallback) {
+                this.statusCallback({ type: 'error', message: error.message });
+              }
             });
         }).listen({ port, host: '0.0.0.0' }, () => {
             console.log('Transfer Server running on port', port);
@@ -52,25 +89,40 @@ export class TransferServer {
     async sendFile(socket: any, fileName: string) {
         const file = this.filesToSend.find(f => f.name === fileName);
         if (!file) {
-            console.log(`[TransferServer] File not found: ${fileName}`);
-            // socket.write("ERROR: File not found"); // Don't write plain error to binary stream
+          console.log(`[TransferServer] File not found: ${fileName}`);
             return;
         }
 
         try {
-            console.log(`[TransferServer] Sending file: ${file.name} (${file.size} bytes)`);
+          console.log(`[TransferServer] Sending file: ${file.name}`);
             
-            const chunkSize = 1024 * 64; // 64KB for speed
+          const chunkSize = 1024 * 64; 
             let offset = 0;
-            const fileSize = file.size;
+          const fileSize = (typeof file.rawSize === 'number' ? file.rawSize : file.size);
+          let lastReportedPercent = 0;
 
             while (offset < fileSize) {
                 const chunkBase64 = await RNFS.read(file.uri, chunkSize, offset, 'base64');
                 const buffer = Buffer.from(chunkBase64, 'base64');
                 socket.write(buffer);
-                offset += chunkSize;
-                
-                // Throttle slightly to prevent buffer overflow on native bridge
+              offset += buffer.length;
+
+              const currentPercent = Math.floor((offset / fileSize) * 100);
+
+              // Only report progress every 5% or at completion to reduce overhead
+              if (this.statusCallback && (currentPercent >= lastReportedPercent + 5 || offset >= fileSize)) {
+                lastReportedPercent = currentPercent;
+                this.statusCallback({
+                  type: 'progress',
+                  fileProgress: {
+                    name: file.name,
+                    percent: currentPercent,
+                    sent: offset,
+                    total: fileSize
+                  }
+                });
+              }
+
                 if (offset % (chunkSize * 10) === 0) {
                     await new Promise(r => setTimeout(r, 1));
                 }
@@ -79,14 +131,17 @@ export class TransferServer {
             
             saveHistoryItem({
                 fileName: file.name,
-                fileSize: file.size,
+              fileSize: fileSize,
                 type: file.type || 'unknown',
                 role: 'sent',
                 status: 'success'
             });
 
-        } catch(e) {
+        } catch (e: any) {
             console.error('Send failed', e);
+          if (this.statusCallback) {
+            this.statusCallback({ type: 'error', message: e.message });
+          }
         }
     }
 
@@ -95,7 +150,9 @@ export class TransferServer {
             this.server.close(); 
             this.server = null;
         }
+      this.connectedClients.clear();
     }
 }
 
 export default new TransferServer();
+

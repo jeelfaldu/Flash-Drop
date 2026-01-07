@@ -178,55 +178,43 @@ const ReceiveScreen = () => {
     if (type === 'qr') {
       try {
         const qr = JSON.parse(data);
-        connectToHotspot(qr.ssid, qr.pass);
+        connectToHotspot(qr.ssid, qr.pass, qr.ip);
       } catch (e) {
         Alert.alert("Error", "Invalid QR");
       }
     }
   };
 
-  const connectToHotspot = async (ssid: string, password?: string) => {
+  const connectToHotspot = async (ssid: string, password?: string, ip?: string) => {
     setConnectionStatus('connecting');
       try {
-        await WifiP2PManager.connectToSSID(ssid, password);
+        if (ssid) {
+          await WifiP2PManager.connectToSSID(ssid, password);
           await new Promise(r => setTimeout(r, 2500)); 
-          connectToTransferServer();
+        }
+        connectToTransferServer(ssid, ip);
       } catch (e: any) {
-          setConnectionStatus('error');
+        setConnectionStatus('error');
         Alert.alert("Connection Error", e.message || "Failed to connect to sender");
       }
   };
   
-  const connectToTransferServer = () => { 
-    const downloadDir = RNFS.DownloadDirectoryPath + '/FlashDrop';
-    TransferClient.start(8888, downloadDir, (status: TransferStatus) => {
-             if (status.type === 'connection' && status.connected) {
-                 setConnectionStatus('connected');
-             }
-             if (status.type === 'progress' && status.fileProgress) {
-                 const { name, percent } = status.fileProgress;
-                 setTransferringFiles(prev => ({
-                     ...prev,
-                     [name]: {
-                         ...prev[name],
-                         name,
-                         progress: percent / 100,
-                         status: percent === 100 ? 'completed' : 'downloading'
-                     }
-                 }));
-             }
-             if (status.files) {
-                 setTransferringFiles(prev => {
-                     const next = { ...prev };
-                     status.files?.forEach(f => {
-                         if (!next[f.name]) {
-                             next[f.name] = { name: f.name, size: f.size, progress: 0, status: 'pending' };
-                         }
-                     });
-                     return next;
-                 });
-             }
-      });
+  const connectToTransferServer = (ssid?: string, ip?: string) => {
+    const downloadDir = Platform.OS === 'android'
+      ? RNFS.DownloadDirectoryPath + '/FlashDrop'
+      : RNFS.DocumentDirectoryPath + '/FlashDrop';
+
+    TransferClient.onStatus = (status: TransferStatus) => {
+      if (status.type === 'connection' && status.connected) {
+        setConnectionStatus('connected');
+        (navigation as any).navigate('FileTransfer', {
+          role: 'receiver',
+          deviceName: ssid || 'Sender',
+          initialFiles: []
+        });
+      }
+    };
+    TransferClient.start(8888, downloadDir, ip);
   };
 
   const renderHeader = () => (
@@ -338,6 +326,14 @@ const ReceiveScreen = () => {
         <View style={styles.centerDevice}>
           <Icon name="cellphone" size={32} color="#FFF" />
         </View>
+
+        {Platform.OS === 'ios' && wifiList.length === 0 && (
+          <View style={{ position: 'absolute', bottom: -40, width: '100%', alignItems: 'center' }}>
+            <Text style={{ color: '#8E8E93', fontSize: 12, textAlign: 'center' }}>
+              iOS hotspot discovery is limited.{"\n"}Try using QR Code for faster connection.
+            </Text>
+          </View>
+        )}
 
         {/* Discovered Senders */}
         {wifiList.slice(0, 3).map((wifi, idx) => (

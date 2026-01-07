@@ -1,116 +1,211 @@
 import React from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Dimensions, StatusBar, Image } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, Dimensions, StatusBar, SafeAreaView } from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
 
-const { width } = Dimensions.get('window');
+import { useTheme } from '../theme/ThemeContext';
+
+const { width, height } = Dimensions.get('window');
 
 const HomeScreen = ({ navigation }: any) => {
+  const { theme, isDark, mode, setMode } = useTheme();
+
+  const toggleTheme = () => {
+    setMode(isDark ? 'light' : 'dark');
+  };
+
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { backgroundColor: theme.background }]}>
       <StatusBar barStyle="light-content" translucent backgroundColor="transparent" />
-      <LinearGradient colors={['#1A1A1A', '#000']} style={StyleSheet.absoluteFillObject} />
 
-      {/* Header */}
-      <View style={styles.header}>
-        <View>
-            <Text style={styles.brand}>FlashDrop</Text>
-            <Text style={styles.tagline}>Future of Sharing</Text>
-        </View>
-        <TouchableOpacity style={styles.historyBtn} onPress={() => navigation.navigate('History')}>
-             <Icon name="history" size={28} color="#FFF" />
-        </TouchableOpacity>
-      </View>
-
-      {/* Main Actions */}
-      <View style={styles.actionsContainer}>
-         {/* Send Button */}
-         <TouchableOpacity 
-            style={styles.actionBtn} 
-            activeOpacity={0.8}
-            onPress={() => navigation.navigate('Send')}
-         >
-             <LinearGradient 
-                colors={['#4CD964', '#2E8B57']} 
-                start={{x: 0, y: 0}} end={{x: 1, y: 1}}
-                style={styles.gradientCard}
-             >
-                <Icon name="send" size={40} color="#FFF" />
-                <Text style={styles.btnTitle}>SEND</Text>
-                <Text style={styles.btnDesc}>Share files instantly</Text>
-             </LinearGradient>
-         </TouchableOpacity>
-
-         {/* Receive Button */}
-         <TouchableOpacity 
-            style={styles.actionBtn} 
-            activeOpacity={0.8}
-            onPress={() => navigation.navigate('Receive')}
-         >
-             <LinearGradient 
-                colors={['#00D1FF', '#005bea']} 
-                start={{x: 0, y: 0}} end={{x: 1, y: 1}}
-                style={styles.gradientCard}
-             >
-                <Icon name="download" size={40} color="#FFF" />
-                <Text style={styles.btnTitle}>RECEIVE</Text>
-                <Text style={styles.btnDesc}>Ready to get files</Text>
-             </LinearGradient>
-         </TouchableOpacity>
-      </View>
-
-      {/* Stats / Info Dashboard */}
-      <View style={styles.statsContainer}>
-          <Text style={styles.sectionTitle}>Dashboard</Text>
-          <View style={styles.statRow}>
-              <View style={styles.statCard}>
-                  <Icon name="wifi-strength-4" size={24} color="#ffd700" />
-                  <Text style={styles.statVal}>Ultra Fast</Text>
-                  <Text style={styles.statLabel}>Local Speed</Text>
-              </View>
-              <View style={styles.statCard}>
-                  <Icon name="security" size={24} color="#00D1FF" />
-                  <Text style={styles.statVal}>Secure</Text>
-                  <Text style={styles.statLabel}>Encryption</Text>
-              </View>
-              <View style={styles.statCard}>
-                  <Icon name="cloud-off-outline" size={24} color="#4CD964" />
-                  <Text style={styles.statVal}>Offline</Text>
-                  <Text style={styles.statLabel}>No Data</Text>
-              </View>
+      {/* Dynamic Purple Header Background */}
+      <View style={styles.headerWrapper}>
+        <LinearGradient
+          colors={isDark ? ['#1E1E1E', '#121212', '#000000'] : ['#6200EA', '#7C4DFF', '#B388FF']}
+          style={styles.headerGradient}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+        />
+        <SafeAreaView>
+          <View style={styles.headerContent}>
+            <Text style={styles.title}>Flash Drop</Text>
+            <View style={styles.headerIcons}>
+              <TouchableOpacity onPress={toggleTheme}>
+                <Icon name={isDark ? "weather-sunny" : "weather-night"} size={28} color="#FFF" style={styles.headerIcon} />
+              </TouchableOpacity>
+              <TouchableOpacity onPress={() => navigation.navigate('History')}>
+                <Icon name="history" size={28} color="#FFF" style={styles.headerIcon} />
+              </TouchableOpacity>
+              <TouchableOpacity onPress={() => { }}>
+                <Icon name="cog-outline" size={28} color="#FFF" style={styles.headerIcon} />
+              </TouchableOpacity>
+            </View>
           </View>
+        </SafeAreaView>
       </View>
 
+      {/* Main Action Card */}
+      <View style={styles.content}>
+        <View style={[styles.card, { backgroundColor: theme.card }]}>
+          <Text style={[styles.cardTitle, { color: theme.text }]}>File Transfer</Text>
+          <Text style={[styles.cardSubtitle, { color: theme.subtext }]}>Share files, images, videos & documents</Text>
+
+          <View style={styles.buttonRow}>
+            {/* Send Button */}
+            <TouchableOpacity 
+              style={[styles.actionButton, styles.sendButton, { backgroundColor: isDark ? '#1E1E1E' : '#E3F2FD', borderColor: isDark ? '#333' : '#BBDEFB' }]}
+              onPress={() => navigation.navigate('Send')}
+              activeOpacity={0.7}
+            >
+              <View style={[styles.iconContainer, styles.sendIconContainer, { backgroundColor: isDark ? '#242424' : '#E3F2FD' }]}>
+                <Icon name="send" size={24} color={isDark ? theme.primary : "#2196F3"} />
+              </View>
+              <View style={styles.buttonTextContainer}>
+                <Text style={[styles.buttonTitle, { color: theme.text }]}>Send File</Text>
+                <Text style={[styles.buttonLabel, { color: theme.subtext }]}>Import</Text>
+              </View>
+            </TouchableOpacity>
+
+            {/* Receive Button */}
+            <TouchableOpacity 
+              style={[styles.actionButton, styles.receiveButton, { backgroundColor: isDark ? '#1E1E1E' : '#FFF3E0', borderColor: isDark ? '#333' : '#FFE0B2' }]}
+              onPress={() => navigation.navigate('Receive')}
+              activeOpacity={0.7}
+            >
+              <View style={[styles.iconContainer, styles.receiveIconContainer, { backgroundColor: isDark ? '#242424' : '#FFF3E0' }]}>
+                <Icon name="folder-download" size={24} color={isDark ? theme.primary : "#FF9800"} />
+              </View>
+              <View style={styles.buttonTextContainer}>
+                <Text style={[styles.buttonTitle, { color: theme.text }]}>Receive</Text>
+                <Text style={[styles.buttonLabel, { color: theme.subtext }]}>Export</Text>
+              </View>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+
+      {/* Decorative Gradient Overlay (Subtle) */}
+      <View style={styles.bottomSection}>
+        {/* Placeholder for future features or history list */}
+      </View>
     </View>
   );
 };
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#000' },
-  header: { 
-      paddingTop: 60, 
-      paddingHorizontal: 25, 
-      flexDirection: 'row', 
-      justifyContent: 'space-between', 
-      alignItems: 'center',
-      marginBottom: 40
+  container: {
+    flex: 1,
+    backgroundColor: '#F8F9FE',
   },
-  brand: { fontSize: 32, fontWeight: '800', color: '#FFF', letterSpacing: 1 },
-  tagline: { fontSize: 14, color: '#888', marginTop: 2 },
-  historyBtn: { backgroundColor: '#333', padding: 10, borderRadius: 50 },
-  
-  actionsContainer: { paddingHorizontal: 20 },
-  actionBtn: { marginBottom: 20, borderRadius: 24, elevation: 10, shadowColor: '#000', shadowOffset: { width:0, height:4 }, shadowOpacity: 0.3, shadowRadius: 5 },
-  gradientCard: { padding: 30, borderRadius: 24, alignItems: 'center', flexDirection: 'column', height: 180, justifyContent: 'center' },
-  btnTitle: { fontSize: 28, fontWeight: 'bold', color: '#FFF', marginTop: 10 },
-  btnDesc: { fontSize: 14, color: 'rgba(255,255,255,0.8)', marginTop: 5 },
-
-  statsContainer: { marginTop: 20, paddingHorizontal: 25 },
-  sectionTitle: { fontSize: 20, fontWeight: 'bold', color: '#FFF', marginBottom: 15 },
-  statRow: { flexDirection: 'row', justifyContent: 'space-between' },
-  statCard: { width: '31%', backgroundColor: '#1E1E1E', padding: 15, borderRadius: 16, alignItems: 'center', borderWidth: 1, borderColor: '#333' },
-  statVal: { color: '#FFF', fontWeight: 'bold', marginTop: 8, fontSize: 13 },
-  statLabel: { color: '#666', fontSize: 10, marginTop: 2 },
+  headerWrapper: {
+    height: height * 0.28,
+    width: '100%',
+    position: 'absolute',
+    top: 0,
+  },
+  headerGradient: {
+    ...StyleSheet.absoluteFillObject,
+    borderBottomLeftRadius: 30,
+    borderBottomRightRadius: 30,
+  },
+  headerContent: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 25,
+    paddingTop: 45,
+  },
+  title: {
+    fontSize: 32,
+    fontWeight: '700',
+    color: '#FFF',
+    letterSpacing: 0.5,
+  },
+  headerIcons: {
+    flexDirection: 'row',
+  },
+  headerIcon: {
+    marginLeft: 15,
+  },
+  content: {
+    marginTop: height * 0.16,
+    paddingHorizontal: 20,
+    zIndex: 1,
+  },
+  card: {
+    backgroundColor: '#FFF',
+    borderRadius: 24,
+    padding: 24,
+    shadowColor: '#6200EA',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.1,
+    shadowRadius: 20,
+    elevation: 10,
+  },
+  cardTitle: {
+    fontSize: 22,
+    fontWeight: '700',
+    color: '#333',
+  },
+  cardSubtitle: {
+    fontSize: 14,
+    color: '#888',
+    marginTop: 4,
+    marginBottom: 20,
+  },
+  buttonRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  actionButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 12,
+    borderRadius: 16,
+    width: '48%',
+    borderWidth: 1,
+  },
+  sendButton: {
+    backgroundColor: '#E3F2FD',
+    borderColor: '#BBDEFB',
+  },
+  receiveButton: {
+    backgroundColor: '#FFF3E0',
+    borderColor: '#FFE0B2',
+  },
+  iconContainer: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#FFF',
+  },
+  sendIconContainer: {
+    backgroundColor: '#E3F2FD',
+  },
+  receiveIconContainer: {
+    backgroundColor: '#FFF3E0',
+  },
+  buttonTextContainer: {
+    marginLeft: 10,
+    flex: 1,
+  },
+  buttonTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#333',
+  },
+  buttonLabel: {
+    fontSize: 12,
+    color: '#777',
+    marginTop: 2,
+  },
+  bottomSection: {
+    flex: 1,
+    marginTop: 20,
+  }
 });
 
 export default HomeScreen;
+

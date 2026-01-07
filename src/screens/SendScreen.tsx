@@ -23,10 +23,16 @@ import { requestConnectPermissions } from '../utils/permissionHelper';
 import { ActivityIndicator, Linking } from 'react-native';
 import WifiManager from 'react-native-wifi-reborn';
 import WifiP2PManager from '../utils/WifiP2PManager';
+import TransferServer from '../utils/TransferServer';
 
 const { width } = Dimensions.get('window');
 
-const SendScreen = ({ navigation }: any) => {
+const SendScreen = ({ navigation, route }: any) => {
+  const params = route?.params || {};
+  const keepConnection = params.keepConnection || false;
+  const currentRole = params.currentRole;
+  const peerDevice = params.peerDevice;
+
   const [activeTab, setActiveTab] = useState('Videos');
   const [activeSubTab, setActiveSubTab] = useState('All');
   const [activeFileSubTab, setActiveFileSubTab] = useState('Documents');
@@ -392,7 +398,7 @@ const SendScreen = ({ navigation }: any) => {
     
     // Check connection
     try {
-      if (Platform.OS === 'android') {
+      if (Platform.OS === 'android' && !keepConnection) {
         const isWifiEnabled = await WifiManager.isEnabled();
         if (!isWifiEnabled) {
           Alert.alert(
@@ -407,11 +413,29 @@ const SendScreen = ({ navigation }: any) => {
         }
       }
 
-      // Just navigate to Sharing screen which handles server start and further checks
-      navigation.navigate('Sharing', { items: selectedItems });
+      if (keepConnection) {
+        // Update existing server with new files
+        TransferServer.updateFiles(selectedItems);
+
+        // Determine the role for navigation
+        // If current role is receiver, they're now sending, so they become sender
+        const newRole = currentRole === 'receiver' ? 'sender' : 'sender';
+
+        // Navigate back to FileTransfer screen
+        navigation.navigate('FileTransfer', {
+          role: newRole,
+          deviceName: peerDevice || 'Connected Device',
+          initialFiles: selectedItems
+        });
+      } else {
+        // Just navigate to Sharing screen which handles server start and further checks
+        navigation.navigate('Sharing', { items: selectedItems });
+      }
     } catch(e) {
       console.log("Send check error:", e);
+      if (!keepConnection) {
         navigation.navigate('Sharing', { items: selectedItems });
+      }
     }
   };
 

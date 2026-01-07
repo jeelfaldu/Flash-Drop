@@ -1,5 +1,5 @@
 import { PermissionsAndroid, Platform } from 'react-native';
-import { check, request, PERMISSIONS, RESULTS } from 'react-native-permissions';
+import { check, request, requestMultiple, PERMISSIONS, RESULTS } from 'react-native-permissions';
 import DeviceInfo from 'react-native-device-info';
 
 export const requestConnectPermissions = async () => {
@@ -42,6 +42,20 @@ export const requestConnectPermissions = async () => {
             granted[PermissionsAndroid.PERMISSIONS.READ_EXTERNAL_STORAGE] === PermissionsAndroid.RESULTS.GRANTED
         );
     }
+  } else if (Platform.OS === 'ios') {
+    const results = await requestMultiple([
+      PERMISSIONS.IOS.PHOTO_LIBRARY,
+      PERMISSIONS.IOS.CONTACTS,
+      PERMISSIONS.IOS.CAMERA,
+      PERMISSIONS.IOS.LOCATION_WHEN_IN_USE
+    ]);
+
+    return (
+      results[PERMISSIONS.IOS.PHOTO_LIBRARY] === RESULTS.GRANTED &&
+      results[PERMISSIONS.IOS.CONTACTS] === RESULTS.GRANTED &&
+      results[PERMISSIONS.IOS.CAMERA] === RESULTS.GRANTED &&
+      results[PERMISSIONS.IOS.LOCATION_WHEN_IN_USE] === RESULTS.GRANTED
+    );
   }
   return true;
 };
@@ -50,12 +64,15 @@ export const requestStoragePermission = async () => {
     if (Platform.OS === 'android') {
         const apiLevel = await DeviceInfo.getApiLevel();
         if(apiLevel >= 33) {
-             return true; // Use READ_MEDIA_* above
+          return true; 
         }
         const granted = await PermissionsAndroid.request(
             PermissionsAndroid.PERMISSIONS.READ_EXTERNAL_STORAGE
         );
         return granted === PermissionsAndroid.RESULTS.GRANTED;
+    } else if (Platform.OS === 'ios') {
+      const status = await request(PERMISSIONS.IOS.PHOTO_LIBRARY);
+      return status === RESULTS.GRANTED;
     }
     return true;
 }

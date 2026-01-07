@@ -8,7 +8,9 @@ import SendScreen from './src/screens/SendScreen';
 import ReceiveScreen from './src/screens/ReceiveScreen';
 import HistoryScreen from './src/screens/HistoryScreen';
 import SharingScreen from './src/screens/SharingScreen';
+import FileTransferScreen from './src/screens/FileTransferScreen';
 import { requestConnectPermissions } from './src/utils/permissionHelper';
+import { ThemeProvider } from './src/theme/ThemeContext';
 
 const Stack = createNativeStackNavigator();
 
@@ -20,8 +22,9 @@ const App = () => {
   }, []);
 
   return (
-    <NavigationContainer>
-      <StatusBar barStyle="light-content" backgroundColor="#121212" />
+    <ThemeProvider>
+      <NavigationContainer>
+        <StatusBar barStyle="light-content" backgroundColor="#121212" />
       <Stack.Navigator
         screenOptions={{
           headerStyle: { backgroundColor: '#121212' },
@@ -37,8 +40,10 @@ const App = () => {
         <Stack.Screen name="Receive" component={ReceiveScreen} options={{ headerShown: false }} />
         <Stack.Screen name="History" component={HistoryScreen} options={{ headerShown: false }} />
         <Stack.Screen name="Sharing" component={SharingScreen} options={{ headerShown: false }} />
+        <Stack.Screen name="FileTransfer" component={FileTransferScreen} options={{ headerShown: false }} />
       </Stack.Navigator>
     </NavigationContainer>
+    </ThemeProvider>
   );
 };
 

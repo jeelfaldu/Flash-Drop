@@ -1,3 +1,4 @@
+import { Platform } from 'react-native';
 import TcpSocket from 'react-native-tcp-socket';
 import RNFS from 'react-native-fs';
 import { Buffer } from 'buffer';
@@ -21,10 +22,11 @@ export class TransferClient {
     private isTransferring = false;
     private shouldStop = false;
     private downloadedFiles = new Set<string>();
+  public onStatus?: (status: TransferStatus) => void;
     
-    start(port = 8888, saveDir: string, onStatus: (status: TransferStatus) => void) {
+  start(port = 8888, saveDir: string, specificIp?: string) {
         this.shouldStop = false;
-        this.initConnection(port, saveDir, onStatus);
+    this.initConnection(port, saveDir, specificIp);
     }
 
     stop() {
@@ -32,54 +34,67 @@ export class TransferClient {
         this.isTransferring = false;
     }
 
-    private async initConnection(port: number, saveDir: string, onStatus: (status: TransferStatus) => void) {
-        onStatus({ type: 'log', message: "Initializing Network...", connected: false });
-        await new Promise(r => setTimeout(r, 1000));
-        
+  private reportStatus(status: TransferStatus) {
+    if (this.onStatus) {
+      this.onStatus(status);
+    }
+  }
+
+  private async initConnection(port: number, saveDir: string, specificIp?: string) {
+    this.reportStatus({ type: 'log', message: "Initializing Network...", connected: false });
+    await new Promise(r => setTimeout(r, 1000));
+
+    if (Platform.OS === 'android') {
         try { await WifiManager.forceWifiUsage(true); } catch(e) {}
-
-        const possibleIps = new Set<string>();
-        try {
-            if (typeof WifiManager.getDhcpInfo === 'function') {
-                const dhcp = await WifiManager.getDhcpInfo();
-                if (dhcp && dhcp.gateway) {
-                    possibleIps.add(dhcp.gateway);
-                }
-            }
-        } catch(e) {}
-
-        possibleIps.add('192.168.49.1');
-        possibleIps.add('192.168.43.1');
-        possibleIps.add('192.168.1.1');
-        
-        const ipList = Array.from(possibleIps);
-        this.findSenderAndConnect(ipList, port, saveDir, onStatus, 1);
     }
 
-    private async findSenderAndConnect(ips: string[], port: number, saveDir: string, onStatus: (status: TransferStatus) => void, attempt: number) {
+    const possibleIps = new Set<string>();
+    if (specificIp) {
+      possibleIps.add(specificIp);
+    }
+
+    try {
+      const wm: any = WifiManager;
+      if (typeof wm.getDhcpInfo === 'function') {
+        const dhcp = await wm.getDhcpInfo();
+        if (dhcp && dhcp.gateway) {
+          possibleIps.add(dhcp.gateway);
+        }
+      }
+    } catch (e) { }
+
+    possibleIps.add('192.168.49.1');
+    possibleIps.add('192.168.43.1');
+    possibleIps.add('192.168.1.1');
+
+    const ipList = Array.from(possibleIps);
+    this.findSenderAndConnect(ipList, port, saveDir, 1);
+  }
+
+  private async findSenderAndConnect(ips: string[], port: number, saveDir: string, attempt: number) {
         if (this.shouldStop) return;
         if (attempt > 15) {
-            onStatus({ type: 'log', message: "Discovery timeout. Check connection.", connected: false });
+          this.reportStatus({ type: 'log', message: "Discovery timeout. Check connection.", connected: false });
             return;
         }
 
-        onStatus({ type: 'log', message: `Connecting (Attempt ${attempt})...`, connected: false });
+    this.reportStatus({ type: 'log', message: `Connecting (Attempt ${attempt})...`, connected: false });
         
         for (const ip of ips) {
-            const success = await this.trySingleIp(ip, port, saveDir, onStatus);
+          const success = await this.trySingleIp(ip, port, saveDir);
             if (success) {
                 // Connection found! Start persistent loop
-                this.persistentLoop(ip, port, saveDir, onStatus);
+              this.persistentLoop(ip, port, saveDir);
                 return;
             }
         }
 
         setTimeout(() => {
-            this.findSenderAndConnect(ips, port, saveDir, onStatus, attempt + 1);
+          this.findSenderAndConnect(ips, port, saveDir, attempt + 1);
         }, 2000);
     }
 
-    private trySingleIp(ip: string, port: number, saveDir: string, onStatus: (status: TransferStatus) => void): Promise<boolean> {
+  private trySingleIp(ip: string, port: number, saveDir: string): Promise<boolean> {
         return new Promise((resolve) => {
             let resolved = false;
             const client = TcpSocket.createConnection({ port, host: ip }, () => {
@@ -104,8 +119,8 @@ export class TransferClient {
         });
     }
 
-    private async persistentLoop(ip: string, port: number, saveDir: string, onStatus: (status: TransferStatus) => void) {
-        onStatus({ type: 'connection', message: "Connected to Sender", connected: true });
+  private async persistentLoop(ip: string, port: number, saveDir: string) {
+    this.reportStatus({ type: 'connection', message: "Connected to Sender", connected: true });
         
         while (!this.shouldStop) {
             if (!this.isTransferring) {
@@ -115,8 +130,8 @@ export class TransferClient {
                         const newFiles = files.filter((f: any) => !this.downloadedFiles.has(f.name + f.size));
                         if (newFiles.length > 0) {
                             this.isTransferring = true;
-                            onStatus({ type: 'log', message: `Found ${newFiles.length} new files`, connected: true, files: files });
-                            await this.downloadAll(newFiles, ip, port, saveDir, onStatus);
+                          this.reportStatus({ type: 'log', message: `Found ${newFiles.length} new files`, connected: true, files: files });
+                          await this.downloadAll(newFiles, ip, port, saveDir);
                             this.isTransferring = false;
                         }
                     }
@@ -152,7 +167,7 @@ export class TransferClient {
         });
     }
     
-    async downloadAll(files: any[], ip: string, port: number, saveDir: string, onStatus: (status: TransferStatus) => void) {
+  async downloadAll(files: any[], ip: string, port: number, saveDir: string) {
         try {
             if (!(await RNFS.exists(saveDir))) {
                 await RNFS.mkdir(saveDir);
@@ -161,16 +176,16 @@ export class TransferClient {
         
         for (const file of files) {
             try {
-                await this.downloadFile(file, ip, port, saveDir, onStatus);
+              await this.downloadFile(file, ip, port, saveDir);
                 this.downloadedFiles.add(file.name + file.size);
             } catch (e: any) {
-                onStatus({ type: 'log', message: `Error: ${file.name} - ${e.message}`, connected: true });
+              this.reportStatus({ type: 'log', message: `Error: ${file.name} - ${e.message}`, connected: true });
             }
         }
-        onStatus({ type: 'complete', message: "Batch completed", connected: true });
+    this.reportStatus({ type: 'complete', message: "Batch completed", connected: true });
     }
 
-    downloadFile(file: any, ip: string, port: number, saveDir: string, onStatus: (status: TransferStatus) => void): Promise<void> {
+  downloadFile(file: any, ip: string, port: number, saveDir: string): Promise<void> {
         return new Promise((resolve, reject) => {
             const destPath = `${saveDir}/${file.name}`;
             RNFS.unlink(destPath).catch(() => {});
@@ -181,6 +196,7 @@ export class TransferClient {
             
             let received = 0;
             const total = file.size;
+          let lastReportedPercent = 0;
             
             client.on('data', async (data) => {
                 try {
@@ -191,16 +207,22 @@ export class TransferClient {
                      await RNFS.appendFile(destPath, b64, 'base64');
                      received += (typeof data === 'string' ? data.length : data.byteLength);
                      
-                     onStatus({
-                         type: 'progress',
-                         connected: true,
-                         fileProgress: {
-                             name: file.name,
-                             percent: Math.floor((received / total) * 100),
+                  const currentPercent = Math.floor((received / total) * 100);
+
+                  // Only report progress every 5% or at completion to reduce overhead
+                  if (currentPercent >= lastReportedPercent + 5 || received >= total) {
+                    lastReportedPercent = currentPercent;
+                    this.reportStatus({
+                      type: 'progress',
+                      connected: true,
+                      fileProgress: {
+                        name: file.name,
+                             percent: currentPercent,
                              received,
                              total
-                         }
-                     });
+                           }
+                         });
+                     }
                      
                      if (received >= total) {
                          client.destroy();

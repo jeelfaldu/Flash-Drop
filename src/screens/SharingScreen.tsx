@@ -21,6 +21,7 @@ import TransferServer from '../utils/TransferServer';
 
 import WifiManager from 'react-native-wifi-reborn';
 import { Linking } from 'react-native';
+import DeviceInfo from 'react-native-device-info';
 
 const { width } = Dimensions.get('window');
 
@@ -87,14 +88,13 @@ const SharingScreen = ({ route, navigation }: any) => {
     const setupHotspot = async () => {
         try {
           setStatus('checking_connection');
-            
-          // 1. Ensure Wi-Fi is enabled (Needed for P2P on Android)
+
           if (Platform.OS === 'android') {
             const isWifiEnabled = await WifiManager.isEnabled();
             if (!isWifiEnabled) {
               Alert.alert(
                 "Wi-Fi Required",
-                "Sharing requires Wi-Fi to be enabled. Please turn on Wi-Fi from settings.",
+                "Sharing requires Wi-Fi to be enabled.",
                 [
                   { text: "Cancel", onPress: () => navigation.goBack(), style: "cancel" },
                   { text: "Open Settings", onPress: () => Linking.sendIntent('android.settings.WIFI_SETTINGS') }
@@ -103,16 +103,11 @@ const SharingScreen = ({ route, navigation }: any) => {
               setStatus('error');
               return;
             }
-          }
 
-          // 2. Initialize P2P properly through our manager (handles initialize())
-          await WifiP2PManager.init();
+            await WifiP2PManager.init();
+            const conn = await WifiP2PManager.getConnectionInfo();
 
-          const conn = await WifiP2PManager.getConnectionInfo();
-
-          if (conn && conn.groupFormed) {
-                console.log("Group already formed, proceeding...");
-            } else {
+            if (!(conn && conn.groupFormed)) {
                 setStatus('creating_hotspot');
                 await WifiP2PManager.createGroup();
             }
@@ -122,25 +117,48 @@ const SharingScreen = ({ route, navigation }: any) => {
             
             if (info) {
                 setGroupInfo(info);
-                const qr = JSON.stringify({
-                    ssid: info.ssid,
-                    pass: info.pass,
-                    ip: info.ownerIp
-                });
-                setQrData(qr);
-                
-                // Start Server
-                TransferServer.start(8888, items);
-                setStatus('ready');
-            } else {
-                setStatus('error');
-                Alert.alert("Error", "Failed to get Hotspot info.");
-            }
-        } catch (e) {
-            console.log(e);
-            setStatus('error');
-            Alert.alert("Error", "Hotspot creation failed.");
+          setQrData(JSON.stringify({ ssid: info.ssid, pass: info.pass, ip: info.ownerIp }));
+          startServer();
+        } else {
+          setStatus('error');
+          Alert.alert("Error", "Failed to get Hotspot info.");
         }
+      } else {
+        // iOS Support: Manual Hotspot or Local Network
+        setStatus('getting_info');
+        const ip = await DeviceInfo.getIpAddress();
+
+        if (ip && ip !== '0.0.0.0') {
+          setGroupInfo({ ssid: 'Local Network', pass: '', ownerIp: ip });
+          setQrData(JSON.stringify({ ssid: null, pass: null, ip: ip }));
+          startServer();
+        } else {
+          setStatus('error');
+          Alert.alert(
+            "Connection Required",
+            "Please connect to Wi-Fi or turn on Personal Hotspot to share files.",
+            [{ text: "OK", onPress: () => navigation.goBack() }]
+          );
+        }
+      }
+    } catch (e) {
+      console.log(e);
+      setStatus('error');
+      Alert.alert("Error", "Initialization failed.");
+    }
+  };
+
+  const startServer = () => {
+    TransferServer.start(8888, items, (serverStatus) => {
+      if (serverStatus.type === 'client_connected') {
+        navigation.navigate('FileTransfer', {
+          role: 'sender',
+          deviceName: serverStatus.clientAddress,
+          initialFiles: items
+        });
+      }
+    });
+    setStatus('ready');
     };
 
   const rotation = rotateAnim.interpolate({
