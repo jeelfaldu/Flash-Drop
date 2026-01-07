@@ -1,6 +1,7 @@
 import { PermissionsAndroid, Platform } from 'react-native';
 import { initialize, startDiscoveringPeers, stopDiscoveringPeers, subscribeOnPeersUpdates, subscribeOnConnectionInfoUpdates, createGroup, removeGroup, connect, getAvailablePeers, getConnectionInfo, getGroupInfo } from 'react-native-wifi-p2p';
 import WifiManager from 'react-native-wifi-reborn';
+import DeviceInfo from 'react-native-device-info';
 import { requestConnectPermissions } from './permissionHelper';
 
 class WifiP2PManager {
@@ -47,7 +48,7 @@ class WifiP2PManager {
     }
 
     // New helper to wait for valid group info
-    async getGroupInfoWithRetry(maxAttempts = 12) {
+  async getGroupInfoWithRetry(maxAttempts = 15) {
         for(let i=0; i<maxAttempts; i++) {
             try {
                 const connInfo = await getConnectionInfo();
@@ -64,11 +65,23 @@ class WifiP2PManager {
                       const pass = group.passphrase || group.password;
                         
                         if (ssid && pass) {
+                          let ownerIp = connInfo.groupOwnerAddress?.hostAddress || connInfo.groupOwnerAddress || '192.168.49.1';
+
+                          // If we are the group owner and can't find hostAddress, try our own IP
+                          if (connInfo.isGroupOwner && (!ownerIp || ownerIp === '127.0.0.1' || typeof ownerIp !== 'string')) {
+                            try {
+                              const myIp = await DeviceInfo.getIpAddress();
+                              if (myIp && myIp !== '0.0.0.0' && myIp !== '127.0.0.1') {
+                                ownerIp = myIp;
+                              }
+                            } catch (e) { }
+                          }
+
                             return { 
                                 ssid, 
                                 pass, 
                                 groupFormed: true,
-                                ownerIp: connInfo.groupOwnerAddress?.hostAddress || '192.168.49.1'
+                              ownerIp: typeof ownerIp === 'string' ? ownerIp : '192.168.49.1'
                             };
                         }
                     } catch(innerErr) {
@@ -76,7 +89,7 @@ class WifiP2PManager {
                     }
                 }
             } catch(e) {}
-            await new Promise(r => setTimeout(r, 2000));
+          await new Promise(r => setTimeout(r, 1000)); // Reduced from 2000
         }
         return null;
     }
@@ -98,23 +111,30 @@ class WifiP2PManager {
         await new Promise(r => setTimeout(r, 1500)); 
 
         console.log(`Connecting to SSID: ${ssid}`);
-        // Logic to try multiple connection methods
+
+      try {
         if (password && password.length > 0) {
-            await WifiManager.connectToProtectedSSID(ssid, password, false, false);
+          await WifiManager.connectToProtectedSSID(ssid, password, false, false);
         } else {
-            // Some libs have connectToSSID only
-            // @ts-ignore
-            if (WifiManager.connectToSSID) {
+          // @ts-ignore
+          if (WifiManager.connectToSSID) {
                 await WifiManager.connectToSSID(ssid);
-            } else {
+              } else {
                 await WifiManager.connectToProtectedSSID(ssid, "", false, false);
-            }
+              }
+        }
+      } catch (e) {
+        console.warn("WIFI Connect attempt failed, but might be connected anyway.");
         }
 
         if (Platform.OS === 'android') {
-             try {
-                await WifiManager.forceWifiUsage(true); 
-             } catch(e) {}
+          // Force Wi-Fi usage with multiple tries
+          for (let i = 0; i < 3; i++) {
+            try {
+                 await new Promise(r => setTimeout(r, 1000));
+                 await WifiManager.forceWifiUsage(true);
+            } catch (e) { }
+          }
         }
     }
 

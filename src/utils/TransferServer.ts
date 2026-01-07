@@ -87,6 +87,8 @@ export class TransferServer {
     }
 
     async sendFile(socket: any, fileName: string) {
+      if (!socket || socket.destroyed) return;
+
         const file = this.filesToSend.find(f => f.name === fileName);
         if (!file) {
           console.log(`[TransferServer] File not found: ${fileName}`);
@@ -97,19 +99,26 @@ export class TransferServer {
           console.log(`[TransferServer] Sending file: ${file.name}`);
             
           const chunkSize = 1024 * 64; 
-            let offset = 0;
-          const fileSize = (typeof file.rawSize === 'number' ? file.rawSize : file.size);
+          let offset = 0;
+
+          let fileSize = 0;
+          if (typeof file.rawSize === 'number') fileSize = file.rawSize;
+          else if (typeof file.size === 'number') fileSize = file.size;
+          else fileSize = 0;
+
           let lastReportedPercent = 0;
 
-            while (offset < fileSize) {
+          while (offset < fileSize && !socket.destroyed) {
                 const chunkBase64 = await RNFS.read(file.uri, chunkSize, offset, 'base64');
                 const buffer = Buffer.from(chunkBase64, 'base64');
+
+              if (socket.destroyed) break;
                 socket.write(buffer);
+
               offset += buffer.length;
 
               const currentPercent = Math.floor((offset / fileSize) * 100);
 
-              // Only report progress every 5% or at completion to reduce overhead
               if (this.statusCallback && (currentPercent >= lastReportedPercent + 5 || offset >= fileSize)) {
                 lastReportedPercent = currentPercent;
                 this.statusCallback({
