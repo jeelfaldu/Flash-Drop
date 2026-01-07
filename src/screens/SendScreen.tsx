@@ -20,7 +20,9 @@ import Contacts from 'react-native-contacts';
 import { CameraRoll } from "@react-native-camera-roll/camera-roll";
 import RNFS from 'react-native-fs';
 import { requestConnectPermissions } from '../utils/permissionHelper';
-import { ActivityIndicator } from 'react-native';
+import { ActivityIndicator, Linking } from 'react-native';
+import WifiManager from 'react-native-wifi-reborn';
+import WifiP2PManager from '../utils/WifiP2PManager';
 
 const { width } = Dimensions.get('window');
 
@@ -390,18 +392,25 @@ const SendScreen = ({ navigation }: any) => {
     
     // Check connection
     try {
-        const { getConnectionInfo } = require('react-native-wifi-p2p');
-        const conn = await getConnectionInfo();
-        
-        if (conn.groupFormed) {
-             // Already connected, just start server and maybe show a progress screen?
-             // For simplicity, always go to Sharing screen which handles server start
-             navigation.navigate('Sharing', { items: selectedItems });
-        } else {
-             // Not connected, go to connect screen (SharingScreen handles this)
-             navigation.navigate('Sharing', { items: selectedItems });
+      if (Platform.OS === 'android') {
+        const isWifiEnabled = await WifiManager.isEnabled();
+        if (!isWifiEnabled) {
+          Alert.alert(
+            "Wi-Fi Required",
+            "Sharing requires Wi-Fi to be enabled. Please turn on Wi-Fi from settings.",
+            [
+              { text: "Cancel", style: "cancel" },
+              { text: "Open Settings", onPress: () => Linking.sendIntent('android.settings.WIFI_SETTINGS') }
+            ]
+          );
+          return;
         }
+      }
+
+      // Just navigate to Sharing screen which handles server start and further checks
+      navigation.navigate('Sharing', { items: selectedItems });
     } catch(e) {
+      console.log("Send check error:", e);
         navigation.navigate('Sharing', { items: selectedItems });
     }
   };

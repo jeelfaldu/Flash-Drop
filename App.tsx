@@ -34,7 +34,7 @@ const App = () => {
       >
         <Stack.Screen name="Home" component={HomeScreen} options={{ headerShown: false }} />
         <Stack.Screen name="Send" component={SendScreen} options={{ headerShown: false }} />
-        <Stack.Screen name="Receive" component={ReceiveScreen} />
+        <Stack.Screen name="Receive" component={ReceiveScreen} options={{ headerShown: false }} />
         <Stack.Screen name="History" component={HistoryScreen} options={{ headerShown: false }} />
         <Stack.Screen name="Sharing" component={SharingScreen} options={{ headerShown: false }} />
       </Stack.Navigator>

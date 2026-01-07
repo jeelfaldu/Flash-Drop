@@ -59,8 +59,9 @@ class WifiP2PManager {
                         console.log("Detailed Group Info:", JSON.stringify(groupDetailed));
                         
                         // Some versions return 'networkName', others 'ssid'
-                        const ssid = groupDetailed.networkName || groupDetailed.ssid;
-                        const pass = groupDetailed.passphrase || groupDetailed.password;
+                      const group: any = groupDetailed;
+                      const ssid = group.networkName || group.ssid;
+                      const pass = group.passphrase || group.password;
                         
                         if (ssid && pass) {
                             return { 
@@ -116,6 +117,11 @@ class WifiP2PManager {
              } catch(e) {}
         }
     }
+
+  async getConnectionInfo() {
+    await this.init();
+    return getConnectionInfo();
+  }
 }
 
 export default new WifiP2PManager();
