@@ -21,13 +21,25 @@ import WifiP2PManager from '../utils/WifiP2PManager';
 import TransferServer from '../utils/TransferServer';
 import WifiManager from 'react-native-wifi-reborn';
 import DeviceInfo from 'react-native-device-info';
-
-const { width } = Dimensions.get('window');
+import { useTheme } from '../theme/ThemeContext';
+import { useConnectionStore, useTransferStore } from '../store';
 
 const SharingScreen = ({ route, navigation }: any) => {
     const { items } = route.params;
+  const { colors, typography, layout, spacing } = useTheme();
+
+  // Zustand stores
+  const {
+    ssid,
+    ipAddress,
+    setConnectionDetails,
+    setConnected
+  } = useConnectionStore();
+  const { setRole, setTransferring } = useTransferStore();
+
+  // Local UI state
     const [status, setStatus] = useState('initializing');
-    const [activeTab, setActiveTab] = useState('qr'); // Default to QR for better visibility
+  const [activeTab, setActiveTab] = useState('qr');
     const [qrData, setQrData] = useState<string>(''); 
     const [groupInfo, setGroupInfo] = useState<any>(null);
 
@@ -36,9 +48,10 @@ const SharingScreen = ({ route, navigation }: any) => {
 
   useEffect(() => {
     setupHotspot();
+    // Only stop server/group if we didn't actually connect
     return () => {
-      TransferServer.stop();
-      WifiP2PManager.removeGroup();
+      // If we are navigating away but not connected, cleanup.
+      // But if we are connected, keep it alive for FileTransferScreen.
     };
   }, []);
 
@@ -102,40 +115,44 @@ const SharingScreen = ({ route, navigation }: any) => {
             await WifiP2PManager.init();
             const conn = await WifiP2PManager.getConnectionInfo();
 
-            if (!(conn && conn.groupFormed)) {
-                setStatus('creating_hotspot');
-                await WifiP2PManager.createGroup();
-            }
-            
-            setStatus('getting_info');
-            const info = await WifiP2PManager.getGroupInfoWithRetry();
-            
-            if (info) {
-                setGroupInfo(info);
-                setQrData(JSON.stringify({ ssid: info.ssid, pass: info.pass, ip: info.ownerIp }));
-                startServer();
-            } else {
-                setStatus('error');
-                Alert.alert("Error", "Failed to get Hotspot info.");
-            }
-      } else {
-            setStatus('getting_info');
-            const ip = await DeviceInfo.getIpAddress();
-            if (ip && ip !== '0.0.0.0' && ip !== '127.0.0.1') {
-              setGroupInfo({ ssid: 'Local Network', pass: '', ownerIp: ip });
-              setQrData(JSON.stringify({ ssid: null, pass: null, ip: ip }));
-              startServer();
-            } else {
-              setStatus('error');
-              Alert.alert("Connection Required", "Please connect to Wi-Fi to share files.");
-            }
+          if (!(conn && conn.groupFormed)) {
+            setStatus('creating_hotspot');
+            await WifiP2PManager.createGroup();
+          }
+
+          setStatus('getting_info');
+          const info = await WifiP2PManager.getGroupInfoWithRetry();
+
+          if (info) {
+            setGroupInfo(info);
+            setConnected(true);
+            setConnectionDetails({ type: 'wifi-direct', ssid: info.ssid, ip: info.ownerIp });
+            setQrData(JSON.stringify({ ssid: info.ssid, pass: info.pass, ip: info.ownerIp }));
+            startServer();
+          } else {
+            setStatus('error');
+            Alert.alert("Error", "Failed to get Hotspot info.");
+          }
+        } else {
+          setStatus('getting_info');
+          const ip = await DeviceInfo.getIpAddress();
+          if (ip && ip !== '0.0.0.0' && ip !== '127.0.0.1') {
+            setGroupInfo({ ssid: 'Local Network', pass: '', ownerIp: ip });
+            setConnected(true);
+            setConnectionDetails({ type: 'hotspot', ssid: 'Local Network', ip: ip });
+            setQrData(JSON.stringify({ ssid: null, pass: null, ip: ip }));
+            startServer();
+          } else {
+            setStatus('error');
+            Alert.alert("Connection Required", "Please connect to Wi-Fi to share files.");
+          }
+        }
+      } catch (e) {
+        console.log(e);
+        setStatus('error');
+        Alert.alert("Error", "Initialization failed.");
       }
-    } catch (e) {
-      console.log(e);
-      setStatus('error');
-      Alert.alert("Error", "Initialization failed.");
-    }
-  };
+    };
 
   const startServer = () => {
     TransferServer.start(8888, items, (serverStatus) => {
@@ -155,128 +172,147 @@ const SharingScreen = ({ route, navigation }: any) => {
     outputRange: ['0deg', '360deg'],
   });
 
-  const renderHeader = () => (
-    <LinearGradient colors={['#7C4DFF', '#6200EA']} style={styles.header}>
-      <View style={styles.headerContent}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
-          <Icon name="arrow-left" size={26} color="#FFF" />
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>Sender</Text>
-        <TouchableOpacity style={styles.helpBtn}>
-          <Icon name="help-circle-outline" size={26} color="#FFF" />
-        </TouchableOpacity>
-      </View>
-    </LinearGradient>
-  );
-
-  const renderRadar = () => (
-    <View style={styles.radarWrapper}>
-      <View style={styles.instructionsContainer}>
-        <View style={styles.dot} />
-        <Text style={styles.instructionsText}>Waiting for receiver to connect...</Text>
-      </View>
-
-      <View style={styles.radarContainer}>
-        <View style={[styles.circle, { width: 280, height: 280, opacity: 0.1 }]} />
-        <View style={[styles.circle, { width: 200, height: 200, opacity: 0.2 }]} />
-        <View style={[styles.circle, { width: 120, height: 120, opacity: 0.3 }]} />
-
-        {[0, 1].map((i) => (
-          <Animated.View key={i} style={[styles.pulseCircle, {
-            opacity: pulseAnim.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0.4, 0.2, 0] }),
-            transform: [{ scale: pulseAnim.interpolate({ inputRange: [0, 1], outputRange: [0.5, 2.5] }) }]
-          }]} />
-        ))}
-
-        <Animated.View style={[styles.sweep, { transform: [{ rotate: rotation }] }]}>
-          <LinearGradient colors={['rgba(98, 0, 234, 0.3)', 'transparent']} start={{ x: 0, y: 0.5 }} end={{ x: 1, y: 0.5 }} style={styles.sweepGradient} />
-        </Animated.View>
-
-        <View style={styles.centerDeviceWrapper}>
-          <View style={styles.centerCircle}>
-            <Icon name="cellphone" size={32} color="#FFF" />
-          </View>
-        </View>
-      </View>
-      
-      {groupInfo?.ownerIp && (
-          <Text style={styles.diagnosticsText}>Server IP: {groupInfo.ownerIp}</Text>
-      )}
-    </View>
-  );
-
-  const renderQRContent = () => (
-    <View style={styles.qrWrapper}>
-      <View style={styles.qrCard}>
-        {qrData ? (
-          <>
-            <QRCode value={qrData} size={220} color="#6200EA" />
-            <Text style={styles.qrHint}>Ask the receiver to scan this QR code</Text>
-            {groupInfo && groupInfo.ssid && (
-              <View style={styles.manualInfo}>
-                <Text style={styles.manualTitle}>Manual Connection</Text>
-                <Text style={styles.manualText}>SSID: {groupInfo.ssid}</Text>
-                <Text style={styles.manualText}>Pass: {groupInfo.pass}</Text>
-                <Text style={[styles.manualText, { marginTop: 10, fontSize: 12, color: '#8E8E93' }]}>IP: {groupInfo.ownerIp}</Text>
-              </View>
-            )}
-          </>
-        ) : (
-            <ActivityIndicator size="large" color="#6200EA" />
-        )}
-      </View>
-    </View>
-  );
-
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { backgroundColor: colors.background }]}>
       <StatusBar barStyle="light-content" backgroundColor="transparent" translucent />
-      {renderHeader()}
+
+      <View style={styles.headerWrapper}>
+        <LinearGradient
+          colors={colors.gradient}
+          style={styles.headerGradient}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+        />
+        <SafeAreaView>
+          <View style={styles.headerContent}>
+            <TouchableOpacity onPress={() => navigation.goBack()} style={styles.iconButton}>
+              <Icon name="arrow-left" size={24} color="#FFF" />
+            </TouchableOpacity>
+            <Text style={[styles.headerTitle, { fontFamily: typography.fontFamily }]}>Sender</Text>
+            <TouchableOpacity style={styles.iconButton}>
+              <Icon name="help-circle-outline" size={24} color="#FFF" />
+            </TouchableOpacity>
+          </View>
+        </SafeAreaView>
+      </View>
 
       <View style={styles.contentContainer}>
-        <View style={styles.mainCard}>
+        <View style={[styles.mainCard, { backgroundColor: colors.surface, ...layout.shadow.medium }]}>
           {status === 'ready' ? (
-              activeTab === 'nearby' ? renderRadar() : renderQRContent()
+            activeTab === 'nearby' ? (
+              <View style={styles.radarWrapper}>
+                <View style={[styles.instructionsContainer, { backgroundColor: colors.background }]}>
+                  <View style={[styles.dot, { backgroundColor: colors.accent }]} />
+                  <Text style={[styles.instructionsText, { color: colors.subtext, fontFamily: typography.fontFamily }]}>
+                    Waiting for receiver...
+                  </Text>
+                </View>
+
+                <View style={styles.radarContainer}>
+                  <View style={[styles.circle, { borderColor: colors.primary, width: 280, height: 280, opacity: 0.1 }]} />
+                  <View style={[styles.circle, { borderColor: colors.primary, width: 200, height: 200, opacity: 0.2 }]} />
+                  <View style={[styles.circle, { borderColor: colors.primary, width: 120, height: 120, opacity: 0.3 }]} />
+
+                  {[0, 1].map((i) => (
+                    <Animated.View key={i} style={[styles.pulseCircle, {
+                      borderColor: colors.primary,
+                      backgroundColor: colors.primary + '15',
+                      opacity: pulseAnim.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0.4, 0.2, 0] }),
+                      transform: [{ scale: pulseAnim.interpolate({ inputRange: [0, 1], outputRange: [0.5, 2.5] }) }]
+                    }]} />
+                  ))}
+
+                  <Animated.View style={[styles.sweep, { transform: [{ rotate: rotation }] }]}>
+                    <LinearGradient
+                      colors={[colors.primary + '66', 'transparent']}
+                      start={{ x: 0, y: 0.5 }}
+                      end={{ x: 1, y: 0.5 }}
+                      style={styles.sweepGradient}
+                    />
+                  </Animated.View>
+
+                  <View style={styles.centerDeviceWrapper}>
+                    <View style={[styles.centerCircle, { backgroundColor: colors.primary }]}>
+                      <Icon name="cellphone" size={32} color="#FFF" />
+                    </View>
+                  </View>
+                </View>
+
+                {groupInfo?.ownerIp && (
+                  <Text style={[styles.diagnosticsText, { color: colors.subtext, fontFamily: typography.fontFamily }]}>
+                    Server IP: {groupInfo.ownerIp}
+                  </Text>
+                )}
+              </View>
+            ) : (
+              <View style={styles.qrWrapper}>
+                <View style={styles.qrCard}>
+                  {qrData ? (
+                    <>
+                        <View style={{ padding: 20, backgroundColor: '#FFF', borderRadius: 20, ...layout.shadow.light }}>
+                          <QRCode value={qrData} size={200} color={colors.primary} backgroundColor="white" />
+                        </View>
+                        <Text style={[styles.qrHint, { color: colors.subtext, fontFamily: typography.fontFamily }]}>
+                          Ask the receiver to scan this QR code
+                        </Text>
+                        {groupInfo && groupInfo.ssid && (
+                          <View style={[styles.manualInfo, { backgroundColor: colors.background }]}>
+                            <Text style={[styles.manualTitle, { color: colors.text, fontFamily: typography.fontFamily }]}>Manual Connection</Text>
+                            <Text style={[styles.manualText, { color: colors.primary, fontFamily: typography.fontFamily }]}>SSID: {groupInfo.ssid}</Text>
+                            <Text style={[styles.manualText, { color: colors.primary, fontFamily: typography.fontFamily }]}>Pass: {groupInfo.pass}</Text>
+                          </View>
+                        )}
+                      </>
+                    ) : (
+                      <ActivityIndicator size="large" color={colors.primary} />
+                    )}
+                  </View>
+                </View>
+              )
           ) : (
               <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
-                  <ActivityIndicator size="large" color="#6200EA" />
-                  <Text style={{ marginTop: 15, color: '#8E8E93' }}>Setting up hotspot...</Text>
+                <ActivityIndicator size="large" color={colors.primary} />
+                <Text style={{ marginTop: 15, color: colors.subtext, fontFamily: typography.fontFamily }}>
+                  Setting up hotspot...
+                </Text>
               </View>
           )}
         </View>
 
-        <View style={styles.bottomButtonsWrapper}>
-          <View style={styles.tabsContainer}>
-            <TouchableOpacity style={styles.tabItem} onPress={() => setActiveTab('nearby')}>
-              {activeTab === 'nearby' ? (
-                <LinearGradient colors={['#7C4DFF', '#6200EA']} style={styles.activeTabGradient}>
-                  <Icon name="radar" size={20} color="#FFF" />
-                  <Text style={styles.activeTabText}>Radar</Text>
-                </LinearGradient>
-              ) : (
-                <View style={styles.inactiveTab}>
-                  <Icon name="radar" size={20} color="#8E8E93" />
-                  <Text style={styles.inactiveTabText}>Radar</Text>
-                </View>
-              )}
+        <View style={[styles.tabsContainer, { backgroundColor: colors.surface, padding: 4, borderRadius: 20 }]}>
+          <TouchableOpacity
+            style={[
+              styles.tabItem,
+              activeTab === 'nearby' && { backgroundColor: colors.primary }
+            ]}
+            onPress={() => setActiveTab('nearby')}
+          >
+            <Icon name="radar" size={20} color={activeTab === 'nearby' ? '#FFF' : colors.subtext} />
+            <Text style={[
+              styles.tabText,
+              {
+                color: activeTab === 'nearby' ? '#FFF' : colors.subtext,
+                fontFamily: typography.fontFamily
+              }
+            ]}>Radar</Text>
             </TouchableOpacity>
 
-            <Text style={styles.orText}>OR</Text>
-
-            <TouchableOpacity style={styles.tabItem} onPress={() => setActiveTab('qr')}>
-              {activeTab === 'qr' ? (
-                <LinearGradient colors={['#7C4DFF', '#6200EA']} style={styles.activeTabGradient}>
-                  <Icon name="qrcode-scan" size={20} color="#FFF" />
-                  <Text style={styles.activeTabText}>QR Code</Text>
-                </LinearGradient>
-              ) : (
-                <View style={styles.inactiveTab}>
-                  <Icon name="qrcode-scan" size={20} color="#8E8E93" />
-                  <Text style={styles.inactiveTabText}>QR Code</Text>
-                </View>
-              )}
+          <TouchableOpacity
+            style={[
+              styles.tabItem,
+              activeTab === 'qr' && { backgroundColor: colors.primary }
+            ]}
+            onPress={() => setActiveTab('qr')}
+          >
+            <Icon name="qrcode-scan" size={20} color={activeTab === 'qr' ? '#FFF' : colors.subtext} />
+            <Text style={[
+              styles.tabText,
+              {
+                color: activeTab === 'qr' ? '#FFF' : colors.subtext,
+                fontFamily: typography.fontFamily
+              }
+            ]}>QR Code</Text>
             </TouchableOpacity>
-          </View>
         </View>
       </View>
     </View>
@@ -284,40 +320,70 @@ const SharingScreen = ({ route, navigation }: any) => {
 };
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#F0F2F5' },
-  header: { height: 100, paddingTop: StatusBar.currentHeight || 20, paddingHorizontal: 15, justifyContent: 'center' },
-  headerContent: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  backBtn: { padding: 5 },
-  headerTitle: { color: '#FFF', fontSize: 20, fontWeight: 'bold' },
-  helpBtn: { padding: 5 },
-  contentContainer: { flex: 1, padding: 15, paddingBottom: 30 },
-  mainCard: { flex: 1, backgroundColor: '#FFF', borderRadius: 25, elevation: 5, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.1, shadowRadius: 10, overflow: 'hidden' },
-  radarWrapper: { flex: 1, alignItems: 'center', paddingTop: 30 },
-  instructionsContainer: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#F8F9FA', paddingHorizontal: 15, paddingVertical: 10, borderRadius: 20 },
-  dot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#DDD', marginRight: 10 },
-  instructionsText: { color: '#8E8E93', fontSize: 13 },
-  radarContainer: { width: 300, height: 300, justifyContent: 'center', alignItems: 'center', marginVertical: 40 },
-  circle: { position: 'absolute', borderRadius: 150, borderWidth: 1, borderColor: '#6200EA' },
-  pulseCircle: { position: 'absolute', width: 100, height: 100, borderRadius: 50, borderWidth: 1, borderColor: '#6200EA', backgroundColor: 'rgba(98, 0, 234, 0.1)' },
+  container: { flex: 1 },
+  headerWrapper: {
+    height: 110,
+    backgroundColor: 'transparent',
+    zIndex: 10,
+  },
+  headerGradient: {
+    ...StyleSheet.absoluteFillObject,
+    borderBottomLeftRadius: 24,
+    borderBottomRightRadius: 24,
+  },
+  headerContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingTop: Platform.OS === 'android' ? 50 : 20,
+    paddingBottom: 15,
+  },
+  headerTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#FFF',
+  },
+  iconButton: {
+    width: 40,
+    height: 40,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderRadius: 20,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+  },
+  contentContainer: {
+    flex: 1,
+    padding: 20,
+    paddingBottom: 30
+  },
+  mainCard: {
+    flex: 1,
+    borderRadius: 24,
+    overflow: 'hidden',
+    marginBottom: 20
+  },
+  radarWrapper: { flex: 1, alignItems: 'center', paddingTop: 20 },
+  instructionsContainer: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 10, borderRadius: 20, marginBottom: 20 },
+  dot: { width: 8, height: 8, borderRadius: 4, marginRight: 10 },
+  instructionsText: { fontSize: 13 },
+  radarContainer: { width: 300, height: 300, justifyContent: 'center', alignItems: 'center', marginVertical: 10 },
+  circle: { position: 'absolute', borderRadius: 150, borderWidth: 1 },
+  pulseCircle: { position: 'absolute', width: 100, height: 100, borderRadius: 50, borderWidth: 1 },
   sweep: { position: 'absolute', width: 300, height: 300, borderRadius: 150, overflow: 'hidden' },
   sweepGradient: { width: 150, height: 300, position: 'absolute', left: 150 },
   centerDeviceWrapper: { zIndex: 10 },
-  centerCircle: { width: 80, height: 80, borderRadius: 40, backgroundColor: '#9575CD', alignItems: 'center', justifyContent: 'center', elevation: 4 },
+  centerCircle: { width: 80, height: 80, borderRadius: 40, alignItems: 'center', justifyContent: 'center', elevation: 4 },
   qrWrapper: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 20 },
   qrCard: { alignItems: 'center' },
-  qrHint: { textAlign: 'center', color: '#8E8E93', marginTop: 20, lineHeight: 20, paddingHorizontal: 20 },
-  manualInfo: { marginTop: 30, padding: 20, backgroundColor: '#F8F9FA', borderRadius: 15, width: '100%', alignItems: 'center' },
-  manualTitle: { fontWeight: 'bold', color: '#333', marginBottom: 10 },
-  manualText: { color: '#6200EA', fontSize: 13, fontWeight: 'bold', marginVertical: 1 },
-  bottomButtonsWrapper: { marginTop: 'auto' },
-  tabsContainer: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  tabItem: { flex: 1 },
-  activeTabGradient: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 14, borderRadius: 30, elevation: 2 },
-  activeTabText: { color: '#FFF', fontWeight: 'bold', marginLeft: 8 },
-  inactiveTab: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 14, borderRadius: 30, backgroundColor: '#F0F0F5' },
-  inactiveTabText: { color: '#8E8E93', fontWeight: 'bold', marginLeft: 8 },
-  orText: { marginHorizontal: 15, color: '#8E8E93', fontWeight: 'bold' },
-  diagnosticsText: { color: '#8E8E93', fontSize: 12, marginTop: 8 },
+  qrHint: { textAlign: 'center', marginTop: 24, lineHeight: 20, paddingHorizontal: 20, fontSize: 16, fontWeight: '500' },
+  manualInfo: { marginTop: 30, padding: 20, borderRadius: 16, width: '100%', alignItems: 'center' },
+  manualTitle: { fontWeight: '700', marginBottom: 12, fontSize: 16 },
+  manualText: { fontSize: 14, fontWeight: '600', marginVertical: 2 },
+  tabsContainer: { flexDirection: 'row', elevation: 5 },
+  tabItem: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 14, borderRadius: 16 },
+  tabText: { fontWeight: '600', marginLeft: 8 },
+  diagnosticsText: { fontSize: 12, marginTop: 10 },
 });
 
 export default SharingScreen;

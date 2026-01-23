@@ -12,8 +12,7 @@ import {
   StatusBar,
   Dimensions,
   Animated,
-  Easing,
-  Linking
+  Easing
 } from 'react-native';
 import { Camera, useCameraDevice, useCodeScanner } from 'react-native-vision-camera';
 import WifiManager from 'react-native-wifi-reborn';
@@ -22,9 +21,10 @@ import LinearGradient from 'react-native-linear-gradient';
 import DeviceInfo from 'react-native-device-info';
 import TransferClient, { TransferStatus } from '../utils/TransferClient';
 import WifiP2PManager from '../utils/WifiP2PManager';
-import { requestConnectPermissions } from '../utils/permissionHelper';
 import RNFS from 'react-native-fs';
 import { useNavigation } from '@react-navigation/native';
+import { useTheme } from '../theme/ThemeContext';
+import { useConnectionStore, useUIStore } from '../store';
 
 const { width } = Dimensions.get('window');
 
@@ -37,12 +37,23 @@ interface TransferringFile {
 
 const ReceiveScreen = () => {
   const navigation = useNavigation();
+  const { colors, typography, layout, spacing } = useTheme();
+
+  // Zustand stores
+  const {
+    isConnected,
+    ipAddress,
+    ssid,
+    setConnected,
+    setConnectionDetails
+  } = useConnectionStore();
+
+  // Local state (UI-specific, not persisted)
   const [activeTab, setActiveTab] = useState<'nearby' | 'qr'>('qr');
   const [hasPermission, setHasPermission] = useState(false);
   const [wifiList, setWifiList] = useState<any[]>([]);
   const [connectionStatus, setConnectionStatus] = useState<string>('idle'); 
   const [transferringFiles, setTransferringFiles] = useState<Record<string, TransferringFile>>({});
-  const [storageInfo, setStorageInfo] = useState({ free: '0GB', total: '0GB', percent: 0 });
   const [localIp, setLocalIp] = useState('');
   const [connectionLog, setConnectionLog] = useState('');
   
@@ -51,32 +62,32 @@ const ReceiveScreen = () => {
   const rotateAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
+    if (isConnected && ipAddress) {
+      (navigation as any).navigate('FileTransfer', {
+        role: 'receiver',
+        deviceName: ssid || 'Sender',
+        initialFiles: []
+      });
+      return;
+    }
+
     (async () => {
       const status = await Camera.requestCameraPermission();
       setHasPermission(status === 'granted');
-      DeviceInfo.getIpAddress().then(setLocalIp);
-      updateStorageInfo();
+      DeviceInfo.getIpAddress().then((ip) => {
+        setLocalIp(ip);
+        setConnectionDetails({ type: null, ip });
+      });
       startWifiScan();
     })();
-    return () => TransferClient.stop();
+    // Cleanup handled explicitly via disconnect or app close
+    return () => { };
   }, []);
 
   useEffect(() => {
     if (activeTab === 'qr') startQRAnimation();
     else startRadarAnimations();
   }, [activeTab]);
-
-  const updateStorageInfo = async () => {
-    try {
-      const total = await DeviceInfo.getTotalDiskCapacity();
-      const free = await DeviceInfo.getFreeDiskStorage();
-      setStorageInfo({
-        free: (free / (1024 * 1024 * 1024)).toFixed(1) + 'GB',
-        total: (total / (1024 * 1024 * 1024)).toFixed(1) + 'GB',
-        percent: (total - free) / total
-      });
-    } catch (e) { }
-  };
 
   const startWifiScan = async () => {
     try {
@@ -123,8 +134,14 @@ const ReceiveScreen = () => {
           await WifiP2PManager.connectToSSID(ssid, password);
           setConnectionLog('Wi-Fi connected. Fetching network IP...');
           await new Promise(r => setTimeout(r, 4000));
+
+          // Update Zustand store
+          setConnectionDetails({ type: 'hotspot', ssid, ip: ip || '' });
         }
-      DeviceInfo.getIpAddress().then(setLocalIp);
+      DeviceInfo.getIpAddress().then((newIp) => {
+        setLocalIp(newIp);
+        setConnectionDetails({ type: 'hotspot', ssid, ip: newIp });
+      });
         connectToTransferServer(ssid, ip);
     } catch (e) {
         setConnectionStatus('error');
@@ -133,11 +150,15 @@ const ReceiveScreen = () => {
   };
 
   const connectToTransferServer = (ssid?: string, ip?: string) => {
-    const downloadDir = Platform.OS === 'android' ? RNFS.DownloadDirectoryPath + '/FlashDrop' : RNFS.DocumentDirectoryPath + '/FlashDrop';
+    // Use ExternalDirectoryPath (Android/data/com.package/files) to avoid Scoped Storage issues on Android 11+
+    const downloadDir = Platform.OS === 'android'
+      ? `${RNFS.ExternalDirectoryPath}/FlashDrop`
+      : `${RNFS.DocumentDirectoryPath}/FlashDrop`;
 
     TransferClient.onStatus = (status: TransferStatus) => {
       if (status.type === 'log') setConnectionLog(status.message || '');
       if (status.type === 'connection' && status.connected) {
+        setConnected(true);
         setConnectionStatus('connected');
         (navigation as any).navigate('FileTransfer', { role: 'receiver', deviceName: ssid || 'Sender', initialFiles: [] });
       }
@@ -145,43 +166,106 @@ const ReceiveScreen = () => {
     TransferClient.start(8888, downloadDir, ip);
   };
 
-  const renderHeader = () => (
-    <LinearGradient colors={['#7C4DFF', '#6200EA']} style={styles.header}>
-      <View style={styles.headerContent}>
-        <TouchableOpacity onPress={() => navigation.goBack()}><Icon name="arrow-left" size={26} color="#FFF" /></TouchableOpacity>
-        <Text style={styles.headerTitle}>Receive Files</Text>
-        <View style={{ width: 26 }} />
-      </View>
-    </LinearGradient>
-  );
+  const rotation = rotateAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['0deg', '360deg'],
+  });
 
   return (
-    <View style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="transparent" translucent />
-      {renderHeader()}
+    <View style={[styles.container, { backgroundColor: colors.background }]}>
+      <StatusBar barStyle="light-content" translucent backgroundColor="transparent" />
+
+      {/* Header */}
+      <View style={styles.headerWrapper}>
+        <LinearGradient
+          colors={colors.gradient}
+          style={styles.headerGradient}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+        />
+        <SafeAreaView>
+          <View style={styles.headerContent}>
+            <TouchableOpacity onPress={() => navigation.goBack()} style={styles.iconButton}>
+              <Icon name="arrow-left" size={24} color="#FFF" />
+            </TouchableOpacity>
+            <Text style={[styles.headerTitle, { fontFamily: typography.fontFamily }]}>Receive Files</Text>
+            <View style={{ width: 40 }} />
+          </View>
+        </SafeAreaView>
+      </View>
 
       <View style={styles.contentContainer}>
-        <View style={styles.mainCard}>
+        <View style={[styles.mainCard, { backgroundColor: colors.surface, ...layout.shadow.medium }]}>
           {activeTab === 'qr' ? (
             <View style={styles.scannerWrapper}>
               {hasPermission && device ? (
-                <View style={styles.cameraFrame}>
-                  <Camera style={StyleSheet.absoluteFill} device={device} isActive={connectionStatus === 'idle'} codeScanner={codeScanner} />
-                  <Animated.View style={[styles.scanLine, { transform: [{ translateY: scanLineAnim }] }]} />
+                <View style={[styles.cameraFrame, { borderColor: colors.primary }]}>
+                  <Camera
+                    style={StyleSheet.absoluteFill}
+                    device={device}
+                    isActive={connectionStatus === 'idle'}
+                    codeScanner={codeScanner}
+                  />
+                  <Animated.View
+                    style={[
+                      styles.scanLine,
+                      {
+                        transform: [{ translateY: scanLineAnim }],
+                        backgroundColor: colors.primary
+                      }
+                    ]}
+                  />
+                  <View style={styles.cornerTL} />
+                  <View style={styles.cornerTR} />
+                  <View style={styles.cornerBL} />
+                  <View style={styles.cornerBR} />
                 </View>
-              ) : <ActivityIndicator size="large" />}
-              <Text style={styles.hintText}>Scan Sender's QR Code</Text>
+              ) : <ActivityIndicator size="large" color={colors.primary} />}
+              <Text style={[styles.hintText, { color: colors.text, fontFamily: typography.fontFamily }]}>
+                Scan sender's QR code
+              </Text>
             </View>
           ) : (
             <View style={styles.radarWrapper}>
-                <Text style={styles.hintText}>Searching for senders...</Text>
+                <View style={styles.radarContainer}>
+                  <View style={[styles.radarCircle, { borderColor: colors.primary, width: 280, height: 280, opacity: 0.1 }]} />
+                  <View style={[styles.radarCircle, { borderColor: colors.primary, width: 200, height: 200, opacity: 0.2 }]} />
+                  <View style={[styles.radarCircle, { borderColor: colors.primary, width: 120, height: 120, opacity: 0.3 }]} />
+                  <Animated.View
+                    style={[
+                      styles.sweep,
+                      { transform: [{ rotate: rotation }] }
+                    ]}
+                  >
+                    <LinearGradient
+                      colors={[colors.primary + '66', 'transparent']}
+                      start={{ x: 0, y: 0.5 }}
+                      end={{ x: 1, y: 0.5 }}
+                      style={styles.sweepGradient}
+                    />
+                  </Animated.View>
+                </View>
+
+                <Text style={[styles.hintText, { color: colors.text, fontFamily: typography.fontFamily, marginBottom: 10 }]}>
+                  Nearby Networks
+                </Text>
+
                 <FlatList 
                   data={wifiList}
                   keyExtractor={(item, index) => index.toString()}
+                  style={{ width: '100%', paddingHorizontal: 20 }}
                   renderItem={({ item }) => (
-                      <TouchableOpacity style={styles.wifiItem} onPress={() => connectToHotspot(item.SSID)}>
-                        <Icon name="wifi" size={20} color="#6200EA" />
-                        <Text style={styles.wifiText}>{item.SSID}</Text>
+                    <TouchableOpacity
+                      style={[styles.wifiItem, { borderBottomColor: colors.border }]}
+                      onPress={() => connectToHotspot(item.SSID)}
+                    >
+                      <View style={[styles.wifiIconBox, { backgroundColor: colors.background }]}>
+                        <Icon name="wifi" size={20} color={colors.primary} />
+                      </View>
+                      <Text style={[styles.wifiText, { color: colors.text, fontFamily: typography.fontFamily }]}>
+                        {item.SSID}
+                      </Text>
+                      <Icon name="chevron-right" size={20} color={colors.subtext} />
                       </TouchableOpacity>
                     )}
                 />
@@ -189,27 +273,53 @@ const ReceiveScreen = () => {
           )}
         </View>
 
-        <View style={styles.tabsContainer}>
-          <TouchableOpacity style={[styles.tab, activeTab === 'qr' && styles.activeTab]} onPress={() => setActiveTab('qr')}>
-            <Icon name="qrcode-scan" size={20} color={activeTab === 'qr' ? '#FFF' : '#8E8E93'} />
-            <Text style={[styles.tabText, activeTab === 'qr' && { color: '#FFF' }]}>QR Scan</Text>
-            </TouchableOpacity>
-          <TouchableOpacity style={[styles.tab, activeTab === 'nearby' && styles.activeTab]} onPress={() => setActiveTab('nearby')}>
-            <Icon name="radar" size={20} color={activeTab === 'nearby' ? '#FFF' : '#8E8E93'} />
-            <Text style={[styles.tabText, activeTab === 'nearby' && { color: '#FFF' }]}>Nearby</Text>
-            </TouchableOpacity>
+        <View style={[styles.tabsContainer, { backgroundColor: colors.surface, padding: 4, borderRadius: 20 }]}>
+          <TouchableOpacity
+            style={[
+              styles.tab,
+              activeTab === 'qr' && { backgroundColor: colors.primary }
+            ]}
+            onPress={() => setActiveTab('qr')}
+          >
+            <Icon name="qrcode-scan" size={20} color={activeTab === 'qr' ? '#FFF' : colors.subtext} />
+            <Text style={[
+              styles.tabText,
+              {
+                color: activeTab === 'qr' ? '#FFF' : colors.subtext,
+                fontFamily: typography.fontFamily
+              }
+            ]}>QR Scan</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[
+              styles.tab,
+              activeTab === 'nearby' && { backgroundColor: colors.primary }
+            ]}
+            onPress={() => setActiveTab('nearby')}
+          >
+            <Icon name="radar" size={20} color={activeTab === 'nearby' ? '#FFF' : colors.subtext} />
+            <Text style={[
+              styles.tabText,
+              {
+                color: activeTab === 'nearby' ? '#FFF' : colors.subtext,
+                fontFamily: typography.fontFamily
+              }
+            ]}>Nearby</Text>
+          </TouchableOpacity>
         </View>
       </View>
 
       {connectionStatus === 'connecting' && (
         <View style={styles.loadingOverlay}>
-          <ActivityIndicator size="large" color="#FFF" />
-          <Text style={styles.loadingTitle}>Connecting to Sender</Text>
-          <Text style={styles.loadingLog}>{connectionLog}</Text>
-          <Text style={styles.ipInfo}>Your IP: {localIp || 'Checking...'}</Text>
-          <TouchableOpacity style={styles.cancelBtn} onPress={() => { TransferClient.stop(); setConnectionStatus('idle'); }}>
-            <Text style={{ color: '#FFF' }}>Cancel</Text>
-          </TouchableOpacity>
+          <View style={[styles.loadingCard, { backgroundColor: colors.surface }]}>
+            <ActivityIndicator size="large" color={colors.primary} />
+            <Text style={[styles.loadingTitle, { color: colors.text }]}>Connecting</Text>
+            <Text style={[styles.loadingLog, { color: colors.subtext }]}>{connectionLog}</Text>
+            <TouchableOpacity style={[styles.cancelBtn, { backgroundColor: colors.border }]} onPress={() => { TransferClient.stop(); setConnectionStatus('idle'); }}>
+              <Text style={{ color: colors.text }}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
         </View>
       )}
     </View>
@@ -217,28 +327,177 @@ const ReceiveScreen = () => {
 };
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#F0F2F5' },
-  header: { height: 100, paddingTop: 40, paddingHorizontal: 15 },
-  headerContent: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  headerTitle: { color: '#FFF', fontSize: 18, fontWeight: 'bold' },
-  contentContainer: { flex: 1, padding: 15 },
-  mainCard: { flex: 1, backgroundColor: '#FFF', borderRadius: 25, elevation: 5, overflow: 'hidden', padding: 20 },
-  scannerWrapper: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  cameraFrame: { width: 240, height: 240, borderRadius: 20, overflow: 'hidden', backgroundColor: '#000' },
-  scanLine: { position: 'absolute', top: 20, left: 10, right: 10, height: 2, backgroundColor: '#FF3B30' },
-  hintText: { marginTop: 20, fontSize: 15, color: '#333', fontWeight: 'bold' },
-  radarWrapper: { flex: 1 },
-  wifiItem: { flexDirection: 'row', alignItems: 'center', padding: 15, borderBottomWidth: 1, borderBottomColor: '#EEE' },
-  wifiText: { marginLeft: 15, fontSize: 14, color: '#333' },
-  tabsContainer: { flexDirection: 'row', marginTop: 20, gap: 10 },
-  tab: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: 15, borderRadius: 15, backgroundColor: '#E0E0E0' },
-  activeTab: { backgroundColor: '#6200EA' },
-  tabText: { marginLeft: 10, fontWeight: 'bold', color: '#8E8E93' },
-  loadingOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.8)', justifyContent: 'center', alignItems: 'center', padding: 20 },
-  loadingTitle: { color: '#FFF', fontSize: 18, fontWeight: 'bold', marginTop: 20 },
-  loadingLog: { color: 'rgba(255,255,255,0.7)', fontSize: 13, marginTop: 10, textAlign: 'center' },
-  ipInfo: { color: '#AAA', fontSize: 11, marginTop: 15 },
-  cancelBtn: { marginTop: 30, padding: 12, borderRadius: 20, backgroundColor: 'rgba(255,255,255,0.2)' }
+  container: { flex: 1 },
+  headerWrapper: {
+    height: 110,
+    backgroundColor: 'transparent',
+    zIndex: 10,
+  },
+  headerGradient: {
+    ...StyleSheet.absoluteFillObject,
+    borderBottomLeftRadius: 24,
+    borderBottomRightRadius: 24,
+  },
+  headerContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingTop: Platform.OS === 'android' ? 50 : 20,
+    paddingBottom: 15,
+  },
+  headerTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#FFF',
+  },
+  iconButton: {
+    width: 40,
+    height: 40,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderRadius: 20,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+  },
+  contentContainer: {
+    flex: 1,
+    padding: 20
+  },
+  mainCard: {
+    flex: 1,
+    borderRadius: 24,
+    overflow: 'hidden',
+    marginBottom: 20,
+  },
+  scannerWrapper: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  cameraFrame: {
+    width: 250,
+    height: 250,
+    borderRadius: 24,
+    overflow: 'hidden',
+    backgroundColor: '#000',
+    borderWidth: 1,
+    position: 'relative',
+  },
+  scanLine: {
+    position: 'absolute',
+    top: 20,
+    left: 20,
+    right: 20,
+    height: 3,
+    borderRadius: 1.5,
+    shadowColor: '#FFF',
+    shadowOpacity: 0.8,
+    shadowRadius: 5,
+    elevation: 5
+  },
+  cornerTL: { position: 'absolute', top: 15, left: 15, width: 30, height: 30, borderTopWidth: 4, borderLeftWidth: 4, borderColor: '#FFF', borderTopLeftRadius: 10 },
+  cornerTR: { position: 'absolute', top: 15, right: 15, width: 30, height: 30, borderTopWidth: 4, borderRightWidth: 4, borderColor: '#FFF', borderTopRightRadius: 10 },
+  cornerBL: { position: 'absolute', bottom: 15, left: 15, width: 30, height: 30, borderBottomWidth: 4, borderLeftWidth: 4, borderColor: '#FFF', borderBottomLeftRadius: 10 },
+  cornerBR: { position: 'absolute', bottom: 15, right: 15, width: 30, height: 30, borderBottomWidth: 4, borderRightWidth: 4, borderColor: '#FFF', borderBottomRightRadius: 10 },
+  hintText: {
+    marginTop: 24,
+    fontSize: 16,
+    fontWeight: '600'
+  },
+  radarWrapper: {
+    flex: 1,
+    alignItems: 'center',
+    paddingTop: 30
+  },
+  radarContainer: {
+    width: 300,
+    height: 300,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 20
+  },
+  radarCircle: {
+    position: 'absolute',
+    borderRadius: 150,
+    borderWidth: 1,
+  },
+  sweep: {
+    position: 'absolute',
+    width: 300,
+    height: 300,
+    borderRadius: 150,
+    overflow: 'hidden',
+  },
+  sweepGradient: {
+    width: 150,
+    height: 300,
+    position: 'absolute',
+    left: 150,
+  },
+  wifiItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+  },
+  wifiIconBox: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 16
+  },
+  wifiText: {
+    flex: 1,
+    fontSize: 16,
+    fontWeight: '500'
+  },
+  tabsContainer: {
+    flexDirection: 'row',
+    elevation: 5
+  },
+  tab: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 14,
+    borderRadius: 16,
+  },
+  tabText: {
+    marginLeft: 8,
+    fontWeight: '600'
+  },
+  loadingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20
+  },
+  loadingCard: {
+    padding: 30,
+    borderRadius: 24,
+    alignItems: 'center',
+    width: '80%'
+  },
+  loadingTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    marginTop: 16
+  },
+  loadingLog: {
+    fontSize: 13,
+    marginTop: 8,
+    textAlign: 'center',
+    marginBottom: 20
+  },
+  cancelBtn: {
+    paddingVertical: 10,
+    paddingHorizontal: 24,
+    borderRadius: 12,
+  }
 });
 
 export default ReceiveScreen;

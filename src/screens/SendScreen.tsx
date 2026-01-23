@@ -1,506 +1,299 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
-  TouchableOpacity,
-  FlatList,
   StyleSheet,
-  Dimensions,
-  StatusBar,
+  TouchableOpacity,
   Image,
-  SafeAreaView,
-  ScrollView,
-  Alert,
+  FlatList,
+  PermissionsAndroid,
   Platform,
+  Alert,
+  Dimensions,
+  ActivityIndicator,
+  TextInput,
+  StatusBar,
+  SafeAreaView
 } from 'react-native';
-import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
-import LinearGradient from 'react-native-linear-gradient';
-import DocumentPicker from 'react-native-document-picker';
-import Contacts from 'react-native-contacts';
 import { CameraRoll } from "@react-native-camera-roll/camera-roll";
 import RNFS from 'react-native-fs';
-import { requestConnectPermissions } from '../utils/permissionHelper';
-import { ActivityIndicator, Linking } from 'react-native';
-import WifiManager from 'react-native-wifi-reborn';
-import WifiP2PManager from '../utils/WifiP2PManager';
-import TransferServer from '../utils/TransferServer';
+import DocumentPicker from 'react-native-document-picker';
+import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
+import LinearGradient from 'react-native-linear-gradient';
+import DeviceInfo from 'react-native-device-info';
+import Contacts from 'react-native-contacts';
+import { useFocusEffect } from '@react-navigation/native';
+import { useTheme } from '../theme/ThemeContext';
+import { useTransferStore, useMediaStore, useUIStore, useConnectionStore } from '../store';
 
 const { width } = Dimensions.get('window');
 
 const SendScreen = ({ navigation, route }: any) => {
-  const params = route?.params || {};
-  const keepConnection = params.keepConnection || false;
-  const currentRole = params.currentRole;
-  const peerDevice = params.peerDevice;
+  const { colors, typography, layout, spacing, isDark } = useTheme();
 
-  const [activeTab, setActiveTab] = useState('Videos');
-  const [activeSubTab, setActiveSubTab] = useState('All');
-  const [activeFileSubTab, setActiveFileSubTab] = useState('Documents');
-  const [selectedFolderName, setSelectedFolderName] = useState<string | null>(null);
-  const [selectedItems, setSelectedItems] = useState<any[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
-
-  // Real Data States
-  const [videos, setVideos] = useState<any[]>([]);
-  const [images, setImages] = useState<any[]>([]);
-  const [videoFolders, setVideoFolders] = useState<any[]>([]);
-  const [imageFolders, setImageFolders] = useState<any[]>([]);
-  const [filesList, setFilesList] = useState<any[]>([]);
-  const [contactsList, setContactsList] = useState<any[]>([]);
-
-  const tabs = ['Files', 'Images', 'Videos', 'Contacts'];
+  // Zustand stores
+  const { selectedItems, toggleItem, clearSelection } = useTransferStore();
+  const { isConnected, ipAddress } = useConnectionStore();
+  const {
+    photos,
+    videos,
+    documents,
+    contacts,
+    apps,
+    isLoading,
+    setPhotos,
+    setVideos,
+    setDocuments,
+    setContacts,
+    setApps,
+    addDocuments,
+    setLoading,
+  } = useMediaStore();
+  const { activeTab, permissionGranted, setActiveTab, setPermissionGranted } = useUIStore();
 
   useEffect(() => {
-    loadAllData();
+    checkPermissions();
   }, []);
 
-  const loadAllData = async () => {
-    if (isLoading) return;
-    setIsLoading(true);
-    const hasPermission = await requestConnectPermissions();
-    if (!hasPermission) {
-      Alert.alert('Permission Denied', 'Please grant permissions to access your files.');
-      setIsLoading(false);
-      return;
-    }
+  const checkPermissions = async () => {
+    if (Platform.OS === 'android') {
+      try {
+        const apiLevel = await DeviceInfo.getApiLevel();
+        let permissions = [
+          PermissionsAndroid.PERMISSIONS.READ_CONTACTS
+        ];
 
-    try {
-      await Promise.all([
-        fetchVideos(),
-        fetchImages(),
-        fetchFiles(),
-        fetchContacts()
-      ]);
-    } catch (error) {
-      console.error('Error fetching data:', error);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const fetchVideos = async () => {
-    try {
-      let allVideos: any[] = [];
-      let hasNextPage = true;
-      let afterCursor: string | undefined = undefined;
-
-      while (hasNextPage) {
-        const result = await CameraRoll.getPhotos({
-          first: 100,
-          after: afterCursor,
-          assetType: 'Videos',
-          include: ['fileSize', 'filename', 'playableDuration'],
-        });
-
-        const formatted = result.edges.map(edge => {
-          const uri = edge.node.image.uri;
-          let group = String(edge.node.group_name || 'Others');
-          const folderPath = uri.includes('/') ? uri.substring(0, uri.lastIndexOf('/')) : group;
-          
-          if (group === 'Others' || group === 'All' || group === 'Recent' || group === 'CameraRoll') {
-            const parts = folderPath.split('/');
-            const last = parts[parts.length - 1];
-            if (last && last !== 'media' && last !== '0' && last !== 'emulated') group = last;
-          }
-
-          return {
-            id: uri || Math.random().toString(),
-            type: 'video',
-            duration: formatDuration(edge.node.image.playableDuration || 0),
-            thumbnail: uri,
-            uri: uri,
-            name: edge.node.image.filename || 'Video',
-            rawSize: edge.node.image.fileSize || 0,
-            group: group,
-            folderPath: folderPath
-          };
-        });
-
-        allVideos = [...allVideos, ...formatted];
-        hasNextPage = result.page_info.has_next_page;
-        afterCursor = result.page_info.end_cursor;
-        if (allVideos.length > 5000) break;
-      }
-
-      setVideos(allVideos);
-      setVideoFolders(groupItemsByFolder(allVideos));
-    } catch (e) {
-      console.log('Video Fetch Error:', e);
-    }
-  };
-
-  const fetchImages = async () => {
-    try {
-      let allImages: any[] = [];
-      let hasNextPage = true;
-      let afterCursor: string | undefined = undefined;
-
-      while (hasNextPage) {
-        const result = await CameraRoll.getPhotos({
-          first: 100,
-          after: afterCursor,
-          assetType: 'Photos',
-          include: ['fileSize', 'filename'],
-        });
-
-        const formatted = result.edges.map(edge => {
-          const uri = edge.node.image.uri;
-          let group = String(edge.node.group_name || 'Others');
-          const folderPath = uri.includes('/') ? uri.substring(0, uri.lastIndexOf('/')) : group;
-
-          if (group === 'Others' || group === 'All' || group === 'Recent' || group === 'CameraRoll') {
-            const parts = folderPath.split('/');
-            const last = parts[parts.length - 1];
-            if (last && last !== 'media' && last !== '0' && last !== 'emulated') group = last;
-          }
-
-          return {
-            id: uri || Math.random().toString(),
-            type: 'image',
-            thumbnail: uri,
-            uri: uri,
-            name: edge.node.image.filename || 'Image',
-            rawSize: edge.node.image.fileSize || 0,
-            group: group,
-            folderPath: folderPath
-          };
-        });
-
-        allImages = [...allImages, ...formatted];
-        hasNextPage = result.page_info.has_next_page;
-        afterCursor = result.page_info.end_cursor;
-        if (allImages.length > 5000) break;
-      }
-
-      setImages(allImages);
-      setImageFolders(groupItemsByFolder(allImages));
-    } catch (e) {
-      console.log('Image Fetch Error:', e);
-    }
-  };
-
-  const fetchFiles = async () => {
-    try {
-      const paths = [];
-      if (Platform.OS === 'android') {
-        const root = RNFS.ExternalStorageDirectoryPath;
-        paths.push(root + '/Download');
-        paths.push(root + '/Documents');
-        paths.push(root + '/Bluetooth');
-        paths.push(root + '/WhatsApp/Media/WhatsApp Documents');
-        paths.push(root + '/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Documents');
-      } else {
-        paths.push(RNFS.DocumentDirectoryPath);
-      }
-
-      const allFiles: any[] = [];
-      for (const path of paths) {
-        if (!path) continue;
-        const exists = await RNFS.exists(path);
-        if (!exists) continue;
-
-        try {
-          const result = await RNFS.readDir(path);
-          const formatted = result
-            .filter(item => item.isFile())
-            .map(item => {
-              const ext = item.name.split('.').pop()?.toLowerCase();
-              return {
-                id: item.path,
-                name: item.name,
-                extension: ext,
-                size: (item.size / 1024 / 1024).toFixed(2) + ' MB',
-                rawSize: item.size,
-                date: item.mtime ? new Date(item.mtime).toLocaleDateString() : 'N/A',
-                uri: 'file://' + item.path,
-                type: getFileType(ext)
-              };
-            });
-          allFiles.push(...formatted);
-        } catch (dirError) {
-          console.log(`Error reading ${path}:`, dirError);
+        if (apiLevel >= 33) {
+          permissions.push(
+            PermissionsAndroid.PERMISSIONS.READ_MEDIA_IMAGES,
+            PermissionsAndroid.PERMISSIONS.READ_MEDIA_VIDEO
+          );
+        } else {
+          permissions.push(
+            PermissionsAndroid.PERMISSIONS.READ_EXTERNAL_STORAGE,
+            PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE
+          );
         }
+
+        const result = await PermissionsAndroid.requestMultiple(permissions);
+
+        const granted = Object.values(result).every(
+          r => r === PermissionsAndroid.RESULTS.GRANTED || r === PermissionsAndroid.RESULTS.NEVER_ASK_AGAIN
+        );
+
+        setPermissionGranted(true);
+        loadMedia();
+        loadContacts(); // Load contacts after permission check
+      } catch (err) {
+        console.warn(err);
+        setLoading(false);
+        Alert.alert("Error", "Failed to check permissions");
       }
-      setFilesList(allFiles);
-    } catch (e) {
-      console.log('File Fetch Error:', e);
+    } else {
+      setPermissionGranted(true);
+      loadMedia();
+      loadContacts();
     }
   };
 
-  const groupItemsByFolder = (items: any[]) => {
-    const groups: { [key: string]: any } = {};
-    items.forEach(item => {
-      const groupId = item.folderPath || item.group || 'Others';
-      const groupDisplayName = item.group || 'Others';
-      
-      if (!groups[groupId]) {
-        groups[groupId] = {
-          id: groupId,
-          name: groupDisplayName,
-          count: 0,
-          thumbnail: item.thumbnail,
-        };
-      }
-      groups[groupId].count++;
-    });
-    return Object.values(groups);
-  };
-
-  const getFileType = (ext?: string) => {
-    if (!ext) return 'other';
-    const docs = ['pdf', 'doc', 'docx', 'txt', 'xls', 'xlsx', 'ppt', 'pptx'];
-    const zips = ['zip', 'rar', '7z', 'tar'];
-    const apps = ['apk', 'apks'];
-    
-    if (docs.includes(ext)) return 'doc';
-    if (zips.includes(ext)) return 'zip';
-    if (apps.includes(ext)) return 'app';
-    return 'other';
-  };
-
-  const fetchContacts = async () => {
+  const loadContacts = async () => {
     try {
-      const contacts = await Contacts.getAll();
-      const formattedContacts = contacts
-        .filter(c => c.phoneNumbers && c.phoneNumbers.length > 0)
-        .slice(0, 100)
-        .map(c => ({
-          id: c.recordID,
-          name: `${c.givenName} ${c.familyName}`.trim() || 'No Name',
-          number: c.phoneNumbers[0].number,
-          color: getRandomColor()
-        }));
-      setContactsList(formattedContacts);
+      const allContacts = await Contacts.getAll();
+      const formatted = allContacts.map((c, index) => ({
+        id: c.recordID || index.toString(),
+        name: [c.givenName, c.familyName].filter(Boolean).join(' '),
+        phoneNumbers: c.phoneNumbers,
+        type: 'contact',
+        size: 200, // Approximate size for VCF
+        icon: 'account'
+      })).filter(c => c.name); // Filter out empty names
+      setContacts(formatted.sort((a, b) => a.name.localeCompare(b.name)));
     } catch (e) {
-      console.log('Contacts Fetch Error:', e);
+      console.log("Error loading contacts", e);
     }
   };
 
-  const formatDuration = (seconds: number) => {
-    const min = Math.floor(seconds / 60);
-    const sec = Math.floor(seconds % 60);
-    return `${min}:${sec < 10 ? '0' : ''}${sec}`;
+  const loadMedia = async () => {
+    setLoading(true);
+    try {
+      const photos = await CameraRoll.getPhotos({
+        first: 100,
+        assetType: 'Photos',
+        include: ['fileSize', 'filename', 'imageSize']
+      });
+      const videoData = await CameraRoll.getPhotos({
+        first: 50,
+        assetType: 'Videos',
+        include: ['fileSize', 'filename', 'playableDuration']
+      });
+
+
+      // Get actual file sizes using RNFS
+      const photosWithSize = await Promise.all(
+        photos.edges.map(async (e) => {
+          const uri = e.node.image.uri;
+          let size = e.node.image.fileSize || 0;
+          let filePath = e.node.image.filepath || uri;
+
+          // Try to get actual size if CameraRoll didn't provide it
+          if (size === 0) {
+            try {
+              // RNFS.stat supports content:// URIs on Android in most cases
+              const stat = await RNFS.stat(uri);
+              size = stat.size;
+            } catch (err) {
+              console.log('Could not stat photo:', uri, err);
+            }
+          }
+
+          return {
+            id: uri,
+            uri: uri,
+            type: 'image',
+            folderPath: filePath,
+            name: e.node.image.filename || `IMG_${Date.now()}.jpg`,
+            size: size
+          };
+        })
+      );
+
+      const videosWithSize = await Promise.all(
+        videoData.edges.map(async (e) => {
+          const uri = e.node.image.uri;
+          let size = e.node.image.fileSize || 0;
+          let filePath = e.node.image.filepath || uri;
+
+          if (size === 0) {
+            try {
+              const stat = await RNFS.stat(uri);
+              size = stat.size;
+            } catch (err) {
+              console.log('Could not stat video:', uri, err);
+            }
+          }
+
+          return {
+            id: uri,
+            uri: uri,
+            type: 'video',
+            folderPath: filePath,
+            name: e.node.image.filename || `VID_${Date.now()}.mp4`,
+            size: size,
+            duration: e.node.image.playableDuration
+          };
+        })
+      );
+
+      setPhotos(photosWithSize);
+      setVideos(videosWithSize);
+
+
+      // Dummy apps for demo (Real app scanning requires native modules)
+      setApps([
+        { id: '1', name: 'Instagram', size: 45000000, icon: 'instagram', type: 'app', packageName: 'com.instagram.android' },
+        { id: '2', name: 'WhatsApp', size: 35000000, icon: 'whatsapp', type: 'app', packageName: 'com.whatsapp' },
+        { id: '3', name: 'Spotify', size: 85000000, icon: 'spotify', type: 'app', packageName: 'com.spotify.music' },
+      ]);
+
+    } catch (error) {
+      console.log('Error loading media:', error);
+      Alert.alert("Access Denied", "Cannot load media. Please allow access in Settings.");
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const getRandomColor = () => {
-    const colors = ['#FFD700', '#FF8C00', '#FF4500', '#00CED1', '#6495ED', '#9370DB'];
-    return colors[Math.floor(Math.random() * colors.length)];
-  };
-
-  const selectFromFileManager = async () => {
+  const pickDocument = async () => {
     try {
       const res = await DocumentPicker.pick({
-        allowMultiSelection: true,
         type: [DocumentPicker.types.allFiles],
+        allowMultiSelection: true
       });
       
-      const newItems = res.map(item => ({
-          id: item.uri,
-          name: item.name || 'Unknown',
-          uri: item.uri,
-          size: item.size || 0,
+      const newDocs = await Promise.all(res.map(async (doc) => {
+        let size = doc.size || 0;
+
+        if (size === 0) {
+          try {
+            const stat = await RNFS.stat(doc.uri);
+            size = stat.size;
+          } catch (e) {
+            console.log('Could not stat picked document:', doc.uri, e);
+          }
+        }
+
+        return {
+          id: doc.uri,
+          uri: doc.uri,
+          name: doc.name,
+          size: size,
+          type: 'document',
+          mime: doc.type
+        };
       }));
-      
-      // Add these to selected items
-      setSelectedItems(prev => [...prev, ...newItems]);
-      Alert.alert('Added', `${res.length} files added to selection`);
+
+      addDocuments(newDocs);
+      newDocs.forEach((d: any) => toggleItem(d));
     } catch (err) {
       if (!DocumentPicker.isCancel(err)) {
-        console.log('Picker Error:', err);
+        console.log(err);
       }
     }
   };
 
   const toggleSelection = (item: any) => {
-    if (!item || !item.id) return;
-    setSelectedItems(prev => {
-        const exists = prev.find(i => i.id === item.id);
-        if (exists) {
-            return prev.filter((i) => i.id !== item.id);
-        } else {
-            return [...prev, item];
-        }
-    });
+    toggleItem(item);
   };
 
-  const toggleSelectAll = () => {
-    let currentList: any[] = [];
-    if (activeTab === 'Videos') {
-       currentList = selectedFolderName ? videos.filter(v => v.group === selectedFolderName) : videos;
-    } else if (activeTab === 'Images') {
-       currentList = selectedFolderName ? images.filter(i => i.group === selectedFolderName) : images;
-    } else if (activeTab === 'Files') {
-        currentList = filesList.filter(f => {
-            if (activeFileSubTab === 'Documents') return f.type === 'doc';
-            if (activeFileSubTab === 'Zip') return f.type === 'zip';
-            if (activeFileSubTab === 'Apps') return f.type === 'app';
-            return f.type === 'other';
-        });
-    } else if (activeTab === 'Contacts') {
-        currentList = contactsList;
-    }
+  const formatSize = (bytes: number) => {
+    if (!bytes) return '0 B';
+    const k = 1024;
+    const s = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + s[i];
+  };
 
-    if (currentList.length === 0) return;
-
-    const allInCurrentSelected = currentList.every(item => selectedItems.find(i => i.id === item.id));
-
-    if (allInCurrentSelected) {
-        setSelectedItems(prev => prev.filter(p => !currentList.find(c => c.id === p.id)));
+  const handleSend = () => {
+    if (selectedItems.length === 0) return;
+    
+    if (isConnected) {
+      navigation.navigate('FileTransfer', { 
+        role: 'sender',
+        initialFiles: selectedItems,
+        deviceName: 'Connected Device'
+      });
     } else {
-        setSelectedItems(prev => {
-            const missing = currentList.filter(c => !prev.find(p => p.id === c.id));
-            return [...prev, ...missing];
-        });
+      navigation.navigate('Sharing', { items: selectedItems });
     }
   };
 
-  const isAllSelected = () => {
-    let currentList: any[] = [];
-    if (activeTab === 'Videos') {
-       currentList = selectedFolderName ? videos.filter(v => v.group === selectedFolderName) : videos;
-    } else if (activeTab === 'Images') {
-       currentList = selectedFolderName ? images.filter(i => i.group === selectedFolderName) : images;
-    } else if (activeTab === 'Files') {
-        currentList = filesList.filter(f => {
-            if (activeFileSubTab === 'Documents') return f.type === 'doc';
-            if (activeFileSubTab === 'Zip') return f.type === 'zip';
-            if (activeFileSubTab === 'Apps') return f.type === 'app';
-            return f.type === 'other';
-        });
-    } else if (activeTab === 'Contacts') {
-        currentList = contactsList;
-    }
-    
-    if (currentList.length === 0) return false;
-    return currentList.every(item => selectedItems.find(i => i.id === item.id));
-  };
-
-  const calculateTotalSize = () => {
-    if (!selectedItems || selectedItems.length === 0) return '0 MB';
-    
-    const totalBytes = selectedItems.reduce((acc, item) => {
-      const bytes = typeof item.rawSize === 'number' ? item.rawSize : 0;
-      return acc + bytes;
-    }, 0);
-    
-    if (totalBytes === 0) return '0 MB';
-    if (totalBytes < 1024) return totalBytes + ' B';
-    if (totalBytes < 1024 * 1024) return (totalBytes / 1024).toFixed(2) + ' KB';
-    if (totalBytes < 1024 * 1024 * 1024) return (totalBytes / (1024 * 1024)).toFixed(2) + ' MB';
-    return (totalBytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
-  };
-
-  const handleSend = async () => {
-    if (selectedItems.length === 0) {
-      Alert.alert('No Items Selected', 'Please select some files to send.');
-      return;
-    }
-    
-    // Check connection
-    try {
-      if (Platform.OS === 'android' && !keepConnection) {
-        const isWifiEnabled = await WifiManager.isEnabled();
-        if (!isWifiEnabled) {
-          Alert.alert(
-            "Wi-Fi Required",
-            "Sharing requires Wi-Fi to be enabled. Please turn on Wi-Fi from settings.",
-            [
-              { text: "Cancel", style: "cancel" },
-              { text: "Open Settings", onPress: () => Linking.sendIntent('android.settings.WIFI_SETTINGS') }
-            ]
-          );
-          return;
-        }
-      }
-
-      if (keepConnection) {
-        // Update existing server with new files
-        TransferServer.updateFiles(selectedItems);
-
-        // Determine the role for navigation
-        // If current role is receiver, they're now sending, so they become sender
-        const newRole = currentRole === 'receiver' ? 'sender' : 'sender';
-
-        // Navigate back to FileTransfer screen
-        navigation.navigate('FileTransfer', {
-          role: newRole,
-          deviceName: peerDevice || 'Connected Device',
-          initialFiles: selectedItems
-        });
-      } else {
-        // Just navigate to Sharing screen which handles server start and further checks
-        navigation.navigate('Sharing', { items: selectedItems });
-      }
-    } catch(e) {
-      console.log("Send check error:", e);
-      if (!keepConnection) {
-        navigation.navigate('Sharing', { items: selectedItems });
-      }
-    }
-  };
-
-  const renderHeader = () => (
-    <View style={styles.header}>
-      <LinearGradient colors={['#7C4DFF', '#6200EA']} style={styles.headerGradient}>
-        <SafeAreaView>
-          <View style={styles.headerTop}>
-            <TouchableOpacity onPress={() => navigation.goBack()} style={styles.iconBtn}>
-              <Icon name="arrow-left" size={26} color="#FFF" />
-            </TouchableOpacity>
-            <Text style={styles.headerTitle}>Send</Text>
-            <TouchableOpacity style={styles.fileManagerBtn} onPress={selectFromFileManager}>
-              <Text style={styles.fileManagerText}>Choose from file manager</Text>
-            </TouchableOpacity>
-          </View>
-          
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.tabScroll}>
-            {tabs.map((tab) => (
-              <TouchableOpacity
-                key={tab}
-                onPress={() => setActiveTab(tab)}
-                style={styles.tabButton}
-              >
-                <Text style={[styles.tabText, activeTab === tab && styles.activeTabText]}>{tab}</Text>
-                {activeTab === tab && <View style={styles.activeIndicator} />}
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
-        </SafeAreaView>
-      </LinearGradient>
-    </View>
-  );
-
-  const renderVideoItem = ({ item }: { item: any }) => {
+  const renderPhotoItem = ({ item }: { item: any }) => {
     const isSelected = selectedItems.find(i => i.id === item.id);
     return (
-      <TouchableOpacity
-        style={styles.mediaItem}
-        onPress={() => toggleSelection(item)}
-        activeOpacity={0.8}
-      >
-        <Image source={{ uri: item.thumbnail }} style={styles.mediaThumb} />
-        <View style={styles.durationBadge}>
-          <Icon name="play-circle-outline" size={12} color="#FFF" />
-          <Text style={styles.durationText}>{item.duration}</Text>
-        </View>
-        <View style={[styles.checkbox, isSelected && styles.checkboxActive]}>
-          {isSelected && <Icon name="check" size={12} color="#FFF" />}
+      <TouchableOpacity onPress={() => toggleSelection(item)} style={styles.gridItem}>
+        <Image source={{ uri: item.uri }} style={styles.gridImage} />
+        <View style={[styles.selectionOverlay, isSelected && { backgroundColor: isDark ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.3)' }]}>
+          <View style={[styles.checkbox, isSelected && { backgroundColor: colors.primary, borderColor: colors.primary }]}>
+            {isSelected && <Icon name="check" size={14} color="#FFF" />}
+          </View>
         </View>
       </TouchableOpacity>
     );
   };
 
-  const renderImageItem = ({ item }: { item: any }) => {
+  const renderVideoItem = ({ item }: { item: any }) => {
     const isSelected = selectedItems.find(i => i.id === item.id);
     return (
-      <TouchableOpacity
-        style={styles.mediaItem}
-        onPress={() => toggleSelection(item)}
-        activeOpacity={0.8}
-      >
-        <Image source={{ uri: item.thumbnail }} style={styles.mediaThumb} />
-        <View style={[styles.checkbox, isSelected && styles.checkboxActive]}>
-          {isSelected && <Icon name="check" size={12} color="#FFF" />}
+      <TouchableOpacity onPress={() => toggleSelection(item)} style={styles.gridItem}>
+        <Image source={{ uri: item.uri }} style={styles.gridImage} />
+        <View style={styles.videoBadge}>
+          <Icon name="play-circle-outline" size={16} color="#FFF" />
+          <Text style={styles.durationText}>{(item.duration / 60).toFixed(1)}m</Text>
+        </View>
+        <View style={[styles.selectionOverlay, isSelected && { backgroundColor: 'rgba(0,0,0,0.3)' }]}>
+          <View style={[styles.checkbox, isSelected && { backgroundColor: colors.primary, borderColor: colors.primary }]}>
+            {isSelected && <Icon name="check" size={14} color="#FFF" />}
+          </View>
         </View>
       </TouchableOpacity>
     );
@@ -508,21 +301,36 @@ const SendScreen = ({ navigation, route }: any) => {
 
   const renderFileItem = ({ item }: { item: any }) => {
     const isSelected = selectedItems.find(i => i.id === item.id);
+    const getIcon = () => {
+      if (item.type === 'app') return 'android';
+      if (item.mime?.includes('pdf')) return 'file-pdf-box';
+      return 'file-document-outline';
+    };
+
     return (
-      <TouchableOpacity
-        style={styles.fileItem}
-        onPress={() => toggleSelection(item)}
-        activeOpacity={0.8}
+      <TouchableOpacity 
+        onPress={() => toggleSelection(item)} 
+        style={[
+          styles.listItem,
+          {
+            backgroundColor: colors.surface,
+            borderBottomColor: colors.border
+          }
+        ]}
       >
-        <View style={styles.fileIconContainer}>
-          <Icon name="file-document-outline" size={32} color="#673AB7" />
+        <View style={[styles.listIconBox, { backgroundColor: item.type === 'app' ? '#E8F5E9' : '#E3F2FD' }]}>
+          <Icon
+            name={item.icon || getIcon()}
+            size={28}
+            color={item.type === 'app' ? '#4CAF50' : '#2196F3'}
+          />
         </View>
-        <View style={styles.fileInfo}>
-          <Text style={styles.fileName}>{item.name}</Text>
-          <Text style={styles.fileDetails}>{item.size} • {item.date}</Text>
+        <View style={styles.listDetails}>
+          <Text style={[styles.listName, { color: colors.text, fontFamily: typography.fontFamily }]} numberOfLines={1}>{item.name}</Text>
+          <Text style={[styles.listSize, { color: colors.subtext, fontFamily: typography.fontFamily }]}>{formatSize(item.size)}</Text>
         </View>
-        <View style={[styles.checkbox, isSelected && styles.checkboxActive]}>
-          {isSelected && <Icon name="check" size={12} color="#FFF" />}
+        <View style={[styles.checkbox, isSelected && { backgroundColor: colors.primary, borderColor: colors.primary }]}>
+          {isSelected && <Icon name="check" size={14} color="#FFF" />}
         </View>
       </TouchableOpacity>
     );
@@ -530,248 +338,223 @@ const SendScreen = ({ navigation, route }: any) => {
 
   const renderContactItem = ({ item }: { item: any }) => {
     const isSelected = selectedItems.find(i => i.id === item.id);
+    const initial = item.name.charAt(0).toUpperCase();
+
     return (
-      <TouchableOpacity
-        style={styles.contactItem}
-        onPress={() => toggleSelection(item)}
-        activeOpacity={0.8}
+      <TouchableOpacity 
+        onPress={() => toggleSelection(item)} 
+        style={[
+          styles.listItem,
+          {
+            backgroundColor: colors.surface,
+            borderBottomColor: colors.border
+          }
+        ]}
       >
-        <View style={[styles.contactAvatar, { backgroundColor: item.color || '#673AB7' }]}>
-          <Icon name="account" size={30} color="#FFF" />
+        <View style={[styles.listIconBox, { backgroundColor: '#F3E5F5' }]}>
+          <Text style={{ fontSize: 20, fontWeight: '700', color: '#9C27B0' }}>{initial}</Text>
         </View>
-        <View style={styles.contactInfo}>
-          <Text style={styles.contactName}>{item.name}</Text>
-          <Text style={styles.contactNumber}>{item.number}</Text>
+        <View style={styles.listDetails}>
+          <Text style={[styles.listName, { color: colors.text, fontFamily: typography.fontFamily }]} numberOfLines={1}>{item.name}</Text>
+          <Text style={[styles.listSize, { color: colors.subtext, fontFamily: typography.fontFamily }]}>
+            {item.phoneNumbers[0]?.number || 'No number'}
+          </Text>
         </View>
-        <View style={[styles.checkbox, isSelected && styles.checkboxActive]}>
-          {isSelected && <Icon name="check" size={12} color="#FFF" />}
+        <View style={[styles.checkbox, isSelected && { backgroundColor: colors.primary, borderColor: colors.primary }]}>
+          {isSelected && <Icon name="check" size={14} color="#FFF" />}
         </View>
       </TouchableOpacity>
     );
   };
 
-  const renderFolderItem = ({ item }: { item: any }) => (
-    <TouchableOpacity
-      style={styles.folderItem}
-      onPress={() => {
-          setSelectedFolderName(item.id); // Store ID (folderPath) instead of name
-          setActiveSubTab('All');
-      }}
-      activeOpacity={0.8}
-    >
-      <View style={styles.folderThumbContainer}>
-        <Image source={{ uri: item.thumbnail }} style={styles.folderThumb} />
-        <View style={styles.folderOverlay}>
-            <Icon name="folder" size={24} color="#FFF" />
-        </View>
-      </View>
-      <View style={styles.folderInfo}>
-        <Text style={styles.folderName} numberOfLines={1}>{item.name}</Text>
-        <Text style={styles.folderCount}>{item.count} items</Text>
-      </View>
-      <Icon name="chevron-right" size={20} color="#CCC" />
-    </TouchableOpacity>
-  );
-
   const renderContent = () => {
-    switch (activeTab) {
-      case 'Videos': {
-        const filtered = selectedFolderName ? videos.filter(v => v.folderPath === selectedFolderName) : videos;
-        const folderName = selectedFolderName ? (videoFolders.find(f => f.id === selectedFolderName)?.name || 'Folder') : '';
-        return (
-          <View style={styles.contentContainer}>
-             <View style={styles.subTabWrapper}>
-                <View style={styles.subTabContainer}>
-                    <TouchableOpacity style={activeSubTab === 'All' ? styles.subTabButtonActive : styles.subTabButton} onPress={() => { setActiveSubTab('All'); setSelectedFolderName(null); }}>
-                        <Text style={activeSubTab === 'All' ? styles.subTabTextActive : styles.subTabText}>All</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity style={activeSubTab === 'Folders' ? styles.subTabButtonActive : styles.subTabButton} onPress={() => setActiveSubTab('Folders')}>
-                        <Text style={activeSubTab === 'Folders' ? styles.subTabTextActive : styles.subTabText}>Folders</Text>
-                    </TouchableOpacity>
-                </View>
-             </View>
-             <View style={styles.sectionHeader}>
-                <Text style={styles.sectionTitle}>{activeSubTab === 'All' ? (selectedFolderName ? `${folderName} (${filtered.length})` : `Videos (${videos.length})`) : `Folders (${videoFolders.length})`}</Text>
-                <TouchableOpacity style={[styles.selectAllCircle, isAllSelected() && { backgroundColor: '#6200EA' }]} onPress={toggleSelectAll}>
-                    {isAllSelected() && <Icon name="check" size={12} color="#FFF" />}
-                </TouchableOpacity>
-             </View>
-             <FlatList key={activeSubTab} data={activeSubTab === 'All' ? filtered : videoFolders} renderItem={activeSubTab === 'All' ? renderVideoItem : renderFolderItem} keyExtractor={(item) => item.id} numColumns={activeSubTab === 'All' ? 3 : 1} contentContainerStyle={activeSubTab === 'All' ? styles.gridContainer : styles.listContainer} />
-          </View>
-        );
-      }
-      case 'Images': {
-        const filtered = selectedFolderName ? images.filter(i => i.folderPath === selectedFolderName) : images;
-        const folderName = selectedFolderName ? (imageFolders.find(f => f.id === selectedFolderName)?.name || 'Folder') : '';
-        return (
-          <View style={styles.contentContainer}>
-            <View style={styles.subTabWrapper}>
-                <View style={styles.subTabContainer}>
-                    <TouchableOpacity style={activeSubTab === 'All' ? styles.subTabButtonActive : styles.subTabButton} onPress={() => { setActiveSubTab('All'); setSelectedFolderName(null); }}>
-                        <Text style={activeSubTab === 'All' ? styles.subTabTextActive : styles.subTabText}>All</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity style={activeSubTab === 'Folders' ? styles.subTabButtonActive : styles.subTabButton} onPress={() => setActiveSubTab('Folders')}>
-                        <Text style={activeSubTab === 'Folders' ? styles.subTabTextActive : styles.subTabText}>Folders</Text>
-                    </TouchableOpacity>
-                </View>
-             </View>
-            <View style={styles.sectionHeader}>
-                <Text style={styles.sectionTitle}>{activeSubTab === 'All' ? (selectedFolderName ? `${folderName} (${filtered.length})` : `Images (${images.length})`) : `Folders (${imageFolders.length})`}</Text>
-                <TouchableOpacity style={[styles.selectAllCircle, isAllSelected() && { backgroundColor: '#6200EA' }]} onPress={toggleSelectAll}>
-                    {isAllSelected() && <Icon name="check" size={12} color="#FFF" />}
-                </TouchableOpacity>
-            </View>
-            <FlatList key={activeSubTab} data={activeSubTab === 'All' ? filtered : imageFolders} renderItem={activeSubTab === 'All' ? renderImageItem : renderFolderItem} keyExtractor={(item) => item.id} numColumns={activeSubTab === 'All' ? 3 : 1} contentContainerStyle={activeSubTab === 'All' ? styles.gridContainer : styles.listContainer} />
-          </View>
-        );
-      }
-      case 'Files': {
-        const filteredFiles = filesList.filter(f => {
-          if (activeFileSubTab === 'Documents') return f.type === 'doc';
-          if (activeFileSubTab === 'Zip') return f.type === 'zip';
-          if (activeFileSubTab === 'Apps') return f.type === 'app';
-          return f.type === 'other';
-        });
-        return (
-          <View style={styles.contentContainer}>
-            <View style={styles.subTabWrapper}>
-                <View style={[styles.subTabContainer, { width: '90%' }]}>
-                    {['Documents', 'Zip', 'Apps', 'Other'].map(sub => (
-                      <TouchableOpacity key={sub} style={activeFileSubTab === sub ? styles.subTabButtonActive : styles.subTabButton} onPress={() => setActiveFileSubTab(sub)}>
-                        <Text style={activeFileSubTab === sub ? styles.subTabTextActive : styles.subTabText}>{sub}</Text>
-                      </TouchableOpacity>
-                    ))}
-                </View>
-             </View>
-            <View style={styles.sectionHeader}>
-                <Text style={styles.sectionTitle}>{activeFileSubTab} ({filteredFiles.length})</Text>
-                <TouchableOpacity style={[styles.selectAllCircle, isAllSelected() && { backgroundColor: '#6200EA' }]} onPress={toggleSelectAll}>
-                    {isAllSelected() && <Icon name="check" size={12} color="#FFF" />}
-                </TouchableOpacity>
-            </View>
-            {filteredFiles.length === 0 ? (
-              <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: 40 }}>
-                 <Icon name="file-search-outline" size={80} color="#EEE" />
-                 <Text style={{ color: '#999', marginTop: 15, fontSize: 16 }}>No {activeFileSubTab.toLowerCase()} found</Text>
-                 <Text style={{ color: '#CCC', marginTop: 5, textAlign: 'center' }}>Check your Download or Documents folder</Text>
-              </View>
-            ) : (
-              <FlatList data={filteredFiles} renderItem={renderFileItem} keyExtractor={(item) => item.id} contentContainerStyle={styles.listContainer} />
-            )}
-          </View>
-        );
-      }
-      case 'Contacts':
-        return (
-          <View style={styles.contentContainer}>
-             <View style={styles.sectionHeader}>
-                <Text style={styles.sectionTitle}>All Contacts ({contactsList.length})</Text>
-                <TouchableOpacity style={[styles.selectAllCircle, isAllSelected() && { backgroundColor: '#6200EA' }]} onPress={toggleSelectAll}>
-                    {isAllSelected() && <Icon name="check" size={12} color="#FFF" />}
-                </TouchableOpacity>
-             </View>
-             <FlatList data={contactsList} renderItem={renderContactItem} keyExtractor={(item) => item.id} contentContainerStyle={styles.listContainer} />
-          </View>
-        );
-      default:
-        return null;
-    }
+    if (activeTab === 'photos') return (
+      <FlatList
+        key="photos"
+        data={photos}
+        numColumns={3}
+        renderItem={renderPhotoItem}
+        keyExtractor={item => item.id}
+        contentContainerStyle={styles.gridContent}
+      />
+    );
+    if (activeTab === 'videos') return (
+      <FlatList
+        key="videos"
+        data={videos}
+        numColumns={3}
+        renderItem={renderVideoItem}
+        keyExtractor={item => item.id}
+        contentContainerStyle={styles.gridContent}
+      />
+    );
+    if (activeTab === 'contacts') return (
+      <FlatList
+        key="contacts"
+        data={contacts}
+        renderItem={renderContactItem}
+        keyExtractor={item => item.id}
+        contentContainerStyle={styles.listContent}
+      />
+    );
+    /* 
+       Merge docs and apps for simpler list view, 
+       or keep separate if needed. 
+       Here we separate by tabs. 
+    */
+    if (activeTab === 'files') return (
+      <View style={{ flex: 1 }}>
+        <TouchableOpacity style={styles.pickDocBtn} onPress={pickDocument}>
+          <Icon name="folder-plus" size={24} color={colors.primary} />
+          <Text style={[styles.pickDocText, { color: colors.primary, fontFamily: typography.fontFamily }]}>Browse Documents</Text>
+        </TouchableOpacity>
+        <FlatList
+          key="files"
+          data={[...apps, ...documents]}
+          renderItem={renderFileItem}
+          keyExtractor={item => item.id}
+          contentContainerStyle={styles.listContent}
+        />
+      </View>
+    );
   };
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { backgroundColor: colors.background }]}>
       <StatusBar barStyle="light-content" translucent backgroundColor="transparent" />
-      {renderHeader()}
-      
-      {isLoading ? (
-        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
-          <ActivityIndicator size="large" color="#6200EA" />
-          <Text style={{ marginTop: 10, color: '#666' }}>Fetching real data...</Text>
-        </View>
-      ) : renderContent()}
 
-      {/* Footer */}
-      <View style={styles.footer}>
-        <View style={styles.footerStats}>
-          <View style={styles.statItem}>
-             <View style={[styles.statDot, { backgroundColor: '#81D4FA' }]} />
-             <Text style={styles.statText}>Size: {calculateTotalSize()}</Text>
+      {/* Header */}
+      <View style={styles.headerWrapper}>
+        <LinearGradient
+          colors={colors.gradient}
+          style={styles.headerGradient}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+        />
+        <SafeAreaView>
+          <View style={styles.headerContent}>
+            <TouchableOpacity onPress={() => navigation.goBack()} style={styles.iconButton}>
+              <Icon name="arrow-left" size={24} color="#FFF" />
+            </TouchableOpacity>
+            <Text style={[styles.headerTitle, { fontFamily: typography.fontFamily }]}>Send Files</Text>
+            <View style={{ width: 40 }} />
           </View>
-        </View>
-        <TouchableOpacity style={styles.sendButton} onPress={handleSend}>
-          <Text style={styles.sendButtonText}>Send</Text>
-        </TouchableOpacity>
+
+          <View style={styles.tabBar}>
+            <TouchableOpacity onPress={() => setActiveTab('photos')} style={[styles.tabItem, activeTab === 'photos' && styles.activeTabItem]}>
+              <Text style={[styles.tabText, activeTab === 'photos' ? { color: '#FFF' } : { color: 'rgba(255,255,255,0.7)' }]}>Photos</Text>
+              {activeTab === 'photos' && <View style={styles.activeIndicator} />}
+                </TouchableOpacity>
+            <TouchableOpacity onPress={() => setActiveTab('videos')} style={[styles.tabItem, activeTab === 'videos' && styles.activeTabItem]}>
+              <Text style={[styles.tabText, activeTab === 'videos' ? { color: '#FFF' } : { color: 'rgba(255,255,255,0.7)' }]}>Videos</Text>
+              {activeTab === 'videos' && <View style={styles.activeIndicator} />}
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => setActiveTab('contacts')} style={[styles.tabItem, activeTab === 'contacts' && styles.activeTabItem]}>
+              <Text style={[styles.tabText, activeTab === 'contacts' ? { color: '#FFF' } : { color: 'rgba(255,255,255,0.7)' }]}>Contacts</Text>
+              {activeTab === 'contacts' && <View style={styles.activeIndicator} />}
+                </TouchableOpacity>
+            <TouchableOpacity onPress={() => setActiveTab('files')} style={[styles.tabItem, activeTab === 'files' && styles.activeTabItem]}>
+              <Text style={[styles.tabText, activeTab === 'files' ? { color: '#FFF' } : { color: 'rgba(255,255,255,0.7)' }]}>Files</Text>
+              {activeTab === 'files' && <View style={styles.activeIndicator} />}
+                </TouchableOpacity>
+          </View>
+        </SafeAreaView>
       </View>
+
+      {isLoading ? (
+        <View style={styles.centerContainer}>
+          <ActivityIndicator size="large" color={colors.primary} />
+          <Text style={{ marginTop: 10, color: colors.subtext }}>Loading Media...</Text>
+        </View>
+      ) : (
+        <View style={styles.content}>
+          {renderContent()}
+        </View>
+      )}
+
+      {selectedItems.length > 0 && (
+        <View style={[styles.footer, { backgroundColor: colors.surface, borderTopColor: colors.border }]}>
+          <View style={styles.selectedInfo}>
+            <Text style={[styles.selectedCount, { color: colors.text, fontFamily: typography.fontFamily }]}>
+              {selectedItems.length} Selected
+            </Text>
+            <Text style={[styles.selectedSize, { color: colors.subtext, fontFamily: typography.fontFamily }]}>
+              {formatSize(selectedItems.reduce((acc, i) => acc + i.size, 0))}
+            </Text>
+          </View>
+          <TouchableOpacity onPress={handleSend}>
+            <LinearGradient colors={colors.gradient} style={styles.sendBtn} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}>
+              <Text style={[styles.sendBtnText, { fontFamily: typography.fontFamily }]}>Send</Text>
+              <Icon name="send" size={20} color="#FFF" />
+            </LinearGradient>
+          </TouchableOpacity>
+        </View>
+      )}
     </View>
   );
 };
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#FFF' },
-  header: { elevation: 8, shadowColor: '#6200EA', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8 },
-  headerGradient: { paddingTop:  StatusBar.currentHeight || 20, paddingBottom: 10 },
-  headerTop: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 15, height: 50 },
-  iconBtn: { padding: 5 },
-  headerTitle: { color: '#FFF', fontSize: 22, fontWeight: 'bold', marginLeft: 10, flex: 1 },
-  fileManagerBtn: { paddingVertical: 6, paddingHorizontal: 12 },
-  fileManagerText: { color: '#FFF', fontSize: 13, opacity: 0.9, fontWeight: '500' },
-  
-  tabScroll: { marginTop: 15, paddingHorizontal: 5 },
-  tabButton: { paddingHorizontal: 18, paddingVertical: 8, alignItems: 'center' },
-  tabText: { color: 'rgba(255,255,255,0.6)', fontSize: 15, fontWeight: '600', letterSpacing: 0.5 },
-  activeTabText: { color: '#FFF' },
-  activeIndicator: { width: 22, height: 3, backgroundColor: '#FFF', borderRadius: 2, marginTop: 6 },
-
-  contentContainer: { flex: 1, backgroundColor: '#FFF' },
-  subTabWrapper: { alignItems: 'center', marginVertical: 15 },
-  subTabContainer: { flexDirection: 'row', backgroundColor: '#F5F5F7', borderRadius: 25, padding: 4, width: '70%' },
-  subTabButton: { flex: 1, alignItems: 'center', paddingVertical: 10, borderRadius: 22 },
-  subTabButtonActive: { flex: 1, alignItems: 'center', paddingVertical: 10, borderRadius: 22, backgroundColor: '#FFF', elevation: 2, shadowColor: '#000', shadowOffset: { width:0, height:1 }, shadowOpacity: 0.1, shadowRadius: 2 },
-  subTabText: { color: '#8E8E93', fontWeight: 'bold', fontSize: 14 },
-  subTabTextActive: { color: '#6200EA', fontWeight: 'bold', fontSize: 14 },
-
-  sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, marginBottom: 15 },
-  sectionTitle: { fontSize: 15, color: '#333', fontWeight: 'bold' },
-  selectAllCircle: { width: 20, height: 20, borderRadius: 10, borderWidth: 1.5, borderColor: '#DDD', alignItems: 'center', justifyContent: 'center' },
-
-  gridContainer: { paddingHorizontal: 10, paddingBottom: 20 },
-  mediaItem: { width: (width - 40) / 3, height: (width - 40) / 3, margin: 5, borderRadius: 12, overflow: 'hidden', elevation: 2, shadowColor: '#000', shadowOffset: { width:0, height:2 }, shadowOpacity: 0.1, shadowRadius: 2 },
-  mediaThumb: { width: '100%', height: '100%' },
-  durationBadge: { position: 'absolute', bottom: 6, left: 6, flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.6)', paddingHorizontal: 5, paddingVertical: 2, borderRadius: 10 },
-  durationText: { color: '#FFF', fontSize: 9, marginLeft: 2, fontWeight: 'bold' },
-  checkbox: { position: 'absolute', top: 6, right: 6, width: 20, height: 20, borderRadius: 10, borderWidth: 1.5, borderColor: '#FFF', alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.2)' },
-  checkboxActive: { backgroundColor: '#6200EA', borderColor: '#6200EA' },
-
-  listContainer: { paddingHorizontal: 20, paddingBottom: 20 },
-  fileItem: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#FFF', padding: 15, borderRadius: 15, marginBottom: 12, elevation: 1, shadowColor: '#000', shadowOffset: { width:0, height:1 }, shadowOpacity: 0.1, shadowRadius: 2, borderWidth: 1, borderColor: '#F0F0F0' },
-  fileIconContainer: { width: 52, height: 52, borderRadius: 12, backgroundColor: '#F3E5F5', alignItems: 'center', justifyContent: 'center' },
-  fileInfo: { flex: 1, marginLeft: 15 },
-  fileName: { fontSize: 15, color: '#333', fontWeight: 'bold' },
-  fileDetails: { fontSize: 12, color: '#999', marginTop: 4 },
-
-  contactItem: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#FFF', padding: 15, borderRadius: 15, marginBottom: 12, elevation: 1, shadowColor: '#000', shadowOffset: { width:0, height:1 }, shadowOpacity: 0.1, shadowRadius: 2, borderWidth: 1, borderColor: '#F0F0F0' },
-  contactAvatar: { width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center' },
-  contactInfo: { flex: 1, marginLeft: 15 },
-  contactName: { fontSize: 16, color: '#333', fontWeight: 'bold' },
-  contactNumber: { fontSize: 13, color: '#999', marginTop: 2 },
-
-  folderItem: { flexDirection: 'row', alignItems: 'center', padding: 10, marginHorizontal: 15, marginBottom: 12, backgroundColor: '#FFF', borderRadius: 15, elevation: 1, shadowColor: '#000', shadowOffset: { width:0, height:1 }, shadowOpacity: 0.1, shadowRadius: 2 },
-  folderThumbContainer: { width: 60, height: 60, borderRadius: 12, overflow: 'hidden' },
-  folderThumb: { width: '100%', height: '100%' },
-  folderOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.3)', alignItems: 'center', justifyContent: 'center' },
-  folderInfo: { flex: 1, marginLeft: 15 },
-  folderName: { fontSize: 16, color: '#333', fontWeight: 'bold' },
-  folderCount: { fontSize: 13, color: '#8E8E93', marginTop: 4 },
-
-  footer: { backgroundColor: '#FFF', padding: 20, borderTopLeftRadius: 35, borderTopRightRadius: 35, elevation: 25, shadowColor: '#000', shadowOffset: { width: 0, height: -10 }, shadowOpacity: 0.15, shadowRadius: 15 },
-  footerStats: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', marginBottom: 18 },
-  statItem: { flexDirection: 'row', alignItems: 'center' },
-  statDot: { width: 10, height: 10, borderRadius: 5, marginRight: 8 },
-  statText: { fontSize: 13, color: '#666', fontWeight: 'bold' },
-  statDivider: { width: 1, height: 15, backgroundColor: '#EEE', marginHorizontal: 20 },
-  sendButton: { backgroundColor: '#6200EA', borderRadius: 30, paddingVertical: 18, alignItems: 'center', justifyContent: 'center', elevation: 4 },
-  sendButtonText: { color: '#FFF', fontSize: 18, fontWeight: 'bold', letterSpacing: 1 },
+  container: { flex: 1 },
+  headerWrapper: {
+    backgroundColor: 'transparent',
+    zIndex: 10,
+    paddingBottom: 10
+  },
+  headerGradient: {
+    ...StyleSheet.absoluteFillObject,
+    borderBottomLeftRadius: 24,
+    borderBottomRightRadius: 24,
+  },
+  headerContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingTop: Platform.OS === 'android' ? 50 : 20,
+    paddingBottom: 15,
+  },
+  headerTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#FFF',
+  },
+  iconButton: {
+    width: 40,
+    height: 40,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderRadius: 20,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+  },
+  tabBar: { flexDirection: 'row', paddingHorizontal: 10, marginTop: 10 },
+  tabItem: { flex: 1, alignItems: 'center', paddingVertical: 10 },
+  activeTabItem: {},
+  tabText: { fontSize: 13, fontWeight: '600' },
+  activeIndicator: { width: 20, height: 3, backgroundColor: '#FFF', borderRadius: 2, marginTop: 4 },
+  content: { flex: 1 },
+  centerContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  gridContent: { padding: 5, paddingBottom: 100 },
+  gridItem: { width: width / 3 - 6, height: width / 3 - 6, margin: 3, borderRadius: 8, overflow: 'hidden' },
+  gridImage: { width: '100%', height: '100%' },
+  selectionOverlay: { ...StyleSheet.absoluteFillObject, justifyContent: 'flex-start', alignItems: 'flex-end', padding: 8 },
+  checkbox: { width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: '#FFF', justifyContent: 'center', alignItems: 'center' },
+  videoBadge: { position: 'absolute', bottom: 5, left: 5, flexDirection: 'row', alignItems: 'center' },
+  durationText: { color: '#FFF', fontSize: 10, marginLeft: 3 },
+  listContent: { padding: 20, paddingBottom: 100 },
+  pickDocBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: 15, marginBottom: 15, borderRadius: 12, borderWidth: 1, borderColor: '#DDD', borderStyle: 'dashed' },
+  pickDocText: { fontSize: 16, fontWeight: '600', marginLeft: 10 },
+  listItem: { flexDirection: 'row', alignItems: 'center', padding: 12, marginBottom: 10, borderRadius: 16, borderBottomWidth: 1 },
+  listIconBox: { width: 48, height: 48, borderRadius: 12, alignItems: 'center', justifyContent: 'center', marginRight: 15 },
+  listDetails: { flex: 1 },
+  listName: { fontSize: 16, fontWeight: '600' },
+  listSize: { fontSize: 12, marginTop: 2 },
+  footer: { position: 'absolute', bottom: 0, left: 0, right: 0, flexDirection: 'row', alignItems: 'center', padding: 20, borderTopWidth: 1, elevation: 10 },
+  selectedInfo: { flex: 1 },
+  selectedCount: { fontSize: 16, fontWeight: '700' },
+  selectedSize: { fontSize: 13 },
+  sendBtn: { flexDirection: 'row', paddingHorizontal: 24, paddingVertical: 12, borderRadius: 30, alignItems: 'center' },
+  sendBtnText: { color: '#FFF', fontSize: 16, fontWeight: '700', marginRight: 8 },
 });
 
 export default SendScreen;
-

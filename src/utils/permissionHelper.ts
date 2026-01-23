@@ -6,6 +6,7 @@ export const requestConnectPermissions = async () => {
   if (Platform.OS === 'android') {
     const apiLevel = await DeviceInfo.getApiLevel();
     
+    // Core permissions for P2P + Contacts restore
     const permissions = [
       PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
       PermissionsAndroid.PERMISSIONS.READ_CONTACTS,
@@ -14,9 +15,6 @@ export const requestConnectPermissions = async () => {
     if (apiLevel >= 33) { // Android 13+
       permissions.push(
         PermissionsAndroid.PERMISSIONS.NEARBY_WIFI_DEVICES,
-        PermissionsAndroid.PERMISSIONS.READ_MEDIA_IMAGES,
-        PermissionsAndroid.PERMISSIONS.READ_MEDIA_VIDEO,
-        PermissionsAndroid.PERMISSIONS.READ_MEDIA_AUDIO
       );
     } else {
       // Android 12 and below
@@ -24,23 +22,23 @@ export const requestConnectPermissions = async () => {
       permissions.push(PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE);
     }
 
-    const granted = await PermissionsAndroid.requestMultiple(permissions);
+    try {
+      const granted = await PermissionsAndroid.requestMultiple(permissions);
 
-    const isFineLocationGranted = granted[PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION] === PermissionsAndroid.RESULTS.GRANTED;
-    const isContactsGranted = granted[PermissionsAndroid.PERMISSIONS.READ_CONTACTS] === PermissionsAndroid.RESULTS.GRANTED;
-    
-    if (apiLevel >= 33) {
-        return (
-            isFineLocationGranted &&
-            isContactsGranted &&
-            granted[PermissionsAndroid.PERMISSIONS.NEARBY_WIFI_DEVICES] === PermissionsAndroid.RESULTS.GRANTED
-        );
-    } else {
-        return (
-            isFineLocationGranted &&
-            isContactsGranted &&
-            granted[PermissionsAndroid.PERMISSIONS.READ_EXTERNAL_STORAGE] === PermissionsAndroid.RESULTS.GRANTED
-        );
+      const isFineLocationGranted = granted[PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION] === PermissionsAndroid.RESULTS.GRANTED;
+      const isContactsGranted = granted[PermissionsAndroid.PERMISSIONS.READ_CONTACTS] === PermissionsAndroid.RESULTS.GRANTED;
+
+      if (apiLevel >= 33) {
+        // Check Nearby Devices
+        const isNearbyGranted = granted[PermissionsAndroid.PERMISSIONS.NEARBY_WIFI_DEVICES] === PermissionsAndroid.RESULTS.GRANTED;
+        return isFineLocationGranted && isNearbyGranted && isContactsGranted;
+      } else {
+        // For older androids, Location is the main gatekeeper for P2P
+        return isFineLocationGranted && isContactsGranted;
+      }
+    } catch (e) {
+      console.warn(e);
+      return false;
     }
   } else if (Platform.OS === 'ios') {
     const results = await requestMultiple([

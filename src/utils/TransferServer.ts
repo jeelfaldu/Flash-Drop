@@ -1,5 +1,6 @@
 import TcpSocket from 'react-native-tcp-socket';
 import RNFS from 'react-native-fs';
+import { Platform } from 'react-native';
 import { Buffer } from 'buffer';
 import { saveHistoryItem } from './HistoryService';
 
@@ -81,18 +82,28 @@ export class TransferServer {
         return { port };
     }
 
-    updateFiles(files: any[]) {
-        this.filesToSend = files;
-        console.log('[TransferServer] Files updated:', files.length);
+  updateFiles(newFiles: any[]) {
+    // Append only if not already present by name and size to avoid duplicates
+    newFiles.forEach(nf => {
+      const exists = this.filesToSend.find(f => f.name === nf.name && f.uri === nf.uri);
+      if (!exists) {
+        this.filesToSend.push(nf);
+      }
+    });
+    console.log(`[TransferServer] Files updated. Total: ${this.filesToSend.length}`);
     }
 
     async sendFile(socket: any, fileName: string) {
       if (!socket || socket.destroyed) return;
 
+      // Find the requested file. Since we might have duplicates with same name, 
+      // normally the receiver should handle this, but here we pick the first match.
         const file = this.filesToSend.find(f => f.name === fileName);
         if (!file) {
-          console.log(`[TransferServer] File not found: ${fileName}`);
-            return;
+          console.log(`[TransferServer] File not found: ${fileName}. Available:`, this.filesToSend.map(f => f.name).join(', '));
+          // Send a tiny error response or just close? 
+          // For now, let's just return.
+          return;
         }
 
         try {
@@ -104,37 +115,76 @@ export class TransferServer {
           let fileSize = 0;
           if (typeof file.rawSize === 'number') fileSize = file.rawSize;
           else if (typeof file.size === 'number') fileSize = file.size;
-          else fileSize = 0;
+
+          if (fileSize === 0) {
+            try {
+              const stat = await RNFS.stat(file.uri);
+              fileSize = stat.size;
+              console.log(`[TransferServer] Found missing size via stat: ${fileSize}`);
+            } catch (e) {
+              console.log(`[TransferServer] Warning: File size is 0 and stat failed for ${file.name}`);
+            }
+          }
 
           let lastReportedPercent = 0;
 
           while (offset < fileSize && !socket.destroyed) {
-                const chunkBase64 = await RNFS.read(file.uri, chunkSize, offset, 'base64');
+            // Handle content:// URIs on Android by copying to a temp file if needed
+            // Note: Better approach is to use a stream, but RNFS chunked read 
+            // is more stable for large files if we have a real file path.
+            let readPath = file.uri;
+            let isTempFile = false;
+
+            if (Platform.OS === 'android' && file.uri.startsWith('content://')) {
+              const tempPath = `${RNFS.CachesDirectoryPath}/temp_${file.name}`;
+              try {
+                // Only copy if it doesn't exist or we want to be fresh
+                // For now, let's copy every time to ensure we have the right file
+                if (await RNFS.exists(tempPath)) await RNFS.unlink(tempPath);
+                await RNFS.copyFile(file.uri, tempPath);
+                readPath = tempPath;
+                isTempFile = true;
+              } catch (copyError) {
+                console.error('Failed to copy content URI to temp:', copyError);
+                throw copyError;
+              }
+            }
+
+            try {
+              while (offset < fileSize && !socket.destroyed) {
+                const chunkBase64 = await RNFS.read(readPath, chunkSize, offset, 'base64');
                 const buffer = Buffer.from(chunkBase64, 'base64');
 
-              if (socket.destroyed) break;
+                if (socket.destroyed) break;
                 socket.write(buffer);
 
-              offset += buffer.length;
+                offset += buffer.length;
 
-              const currentPercent = Math.floor((offset / fileSize) * 100);
+                const currentPercent = Math.floor((offset / fileSize) * 100);
 
-              if (this.statusCallback && (currentPercent >= lastReportedPercent + 5 || offset >= fileSize)) {
-                lastReportedPercent = currentPercent;
-                this.statusCallback({
-                  type: 'progress',
-                  fileProgress: {
-                    name: file.name,
-                    percent: currentPercent,
-                    sent: offset,
-                    total: fileSize
-                  }
-                });
-              }
+                if (this.statusCallback && (currentPercent >= lastReportedPercent + 5 || offset >= fileSize)) {
+                  lastReportedPercent = currentPercent;
+                  this.statusCallback({
+                    type: 'progress',
+                    fileProgress: {
+                      name: file.name,
+                      percent: currentPercent,
+                      sent: offset,
+                      total: fileSize
+                    }
+                  });
+                }
 
                 if (offset % (chunkSize * 10) === 0) {
-                    await new Promise(r => setTimeout(r, 1));
+                  await new Promise(r => setTimeout(r, 1));
                 }
+              }
+            } finally {
+              // Cleanup temp file
+              if (isTempFile && await RNFS.exists(readPath)) {
+                await RNFS.unlink(readPath);
+              }
+            }
             }
             console.log(`[TransferServer] Sent ${fileName}`);
             
