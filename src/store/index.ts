@@ -110,6 +110,7 @@ interface MediaState {
   photos: any[];
   videos: any[];
   documents: any[];
+  audio: any[];
   contacts: any[];
   apps: any[];
   
@@ -119,6 +120,7 @@ interface MediaState {
   setPhotos: (photos: any[]) => void;
   setVideos: (videos: any[]) => void;
   setDocuments: (documents: any[]) => void;
+  setAudio: (audio: any[]) => void;
   setContacts: (contacts: any[]) => void;
   setApps: (apps: any[]) => void;
   
@@ -132,6 +134,7 @@ export const useMediaStore = create<MediaState>((set) => ({
   photos: [],
   videos: [],
   documents: [],
+  audio: [],
   contacts: [],
   apps: [],
   isLoading: false,
@@ -140,6 +143,7 @@ export const useMediaStore = create<MediaState>((set) => ({
   setPhotos: (photos) => set({ photos }),
   setVideos: (videos) => set({ videos }),
   setDocuments: (documents) => set({ documents }),
+  setAudio: (audio) => set({ audio }),
   setContacts: (contacts) => set({ contacts }),
   setApps: (apps) => set({ apps }),
   
@@ -154,6 +158,7 @@ export const useMediaStore = create<MediaState>((set) => ({
     photos: [],
     videos: [],
     documents: [],
+    audio: [],
     contacts: [],
     apps: [],
     isLoading: false,

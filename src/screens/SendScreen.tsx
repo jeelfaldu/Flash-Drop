@@ -26,30 +26,38 @@ import { useFocusEffect } from '@react-navigation/native';
 import { useTheme } from '../theme/ThemeContext';
 import { useTransferStore, useMediaStore, useUIStore, useConnectionStore } from '../store';
 
+import { PhotosTab } from '../components/send/PhotosTab';
+import { VideosTab } from '../components/send/VideosTab';
+import { ContactsTab } from '../components/send/ContactsTab';
+import { FilesTab } from '../components/send/FilesTab';
+
 const { width } = Dimensions.get('window');
 
 const SendScreen = ({ navigation, route }: any) => {
   const { colors, typography, layout, spacing, isDark } = useTheme();
 
   // Zustand stores
-  const { selectedItems, toggleItem, clearSelection } = useTransferStore();
+  const { selectedItems, toggleItem, clearSelection, setSelectedItems } = useTransferStore();
   const { isConnected, ipAddress } = useConnectionStore();
   const {
     photos,
     videos,
     documents,
+    audio,
     contacts,
     apps,
     isLoading,
     setPhotos,
     setVideos,
     setDocuments,
+    setAudio,
     setContacts,
     setApps,
     addDocuments,
     setLoading,
   } = useMediaStore();
   const { activeTab, permissionGranted, setActiveTab, setPermissionGranted } = useUIStore();
+  const [fileCategory, setFileCategory] = useState<'all' | 'audio' | 'docs' | 'apps'>('all');
 
   useEffect(() => {
     checkPermissions();
@@ -116,7 +124,7 @@ const SendScreen = ({ navigation, route }: any) => {
   const loadMedia = async () => {
     setLoading(true);
     try {
-      const photos = await CameraRoll.getPhotos({
+      const photosData = await CameraRoll.getPhotos({
         first: 100,
         assetType: 'Photos',
         include: ['fileSize', 'filename', 'imageSize']
@@ -130,15 +138,13 @@ const SendScreen = ({ navigation, route }: any) => {
 
       // Get actual file sizes using RNFS
       const photosWithSize = await Promise.all(
-        photos.edges.map(async (e) => {
+        photosData.edges.map(async (e) => {
           const uri = e.node.image.uri;
           let size = e.node.image.fileSize || 0;
           let filePath = e.node.image.filepath || uri;
 
-          // Try to get actual size if CameraRoll didn't provide it
           if (size === 0) {
             try {
-              // RNFS.stat supports content:// URIs on Android in most cases
               const stat = await RNFS.stat(uri);
               size = stat.size;
             } catch (err) {
@@ -152,7 +158,8 @@ const SendScreen = ({ navigation, route }: any) => {
             type: 'image',
             folderPath: filePath,
             name: e.node.image.filename || `IMG_${Date.now()}.jpg`,
-            size: size
+            size: size,
+            timestamp: e.node.timestamp
           };
         })
       );
@@ -179,7 +186,8 @@ const SendScreen = ({ navigation, route }: any) => {
             folderPath: filePath,
             name: e.node.image.filename || `VID_${Date.now()}.mp4`,
             size: size,
-            duration: e.node.image.playableDuration
+            duration: e.node.image.playableDuration,
+            timestamp: e.node.timestamp
           };
         })
       );
@@ -187,19 +195,87 @@ const SendScreen = ({ navigation, route }: any) => {
       setPhotos(photosWithSize);
       setVideos(videosWithSize);
 
-
-      // Dummy apps for demo (Real app scanning requires native modules)
-      setApps([
-        { id: '1', name: 'Instagram', size: 45000000, icon: 'instagram', type: 'app', packageName: 'com.instagram.android' },
-        { id: '2', name: 'WhatsApp', size: 35000000, icon: 'whatsapp', type: 'app', packageName: 'com.whatsapp' },
-        { id: '3', name: 'Spotify', size: 85000000, icon: 'spotify', type: 'app', packageName: 'com.spotify.music' },
-      ]);
+      // Scan for other files on Android
+      if (Platform.OS === 'android') {
+        await scanStorageFiles();
+      }
 
     } catch (error) {
       console.log('Error loading media:', error);
       Alert.alert("Access Denied", "Cannot load media. Please allow access in Settings.");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const scanStorageFiles = async () => {
+    try {
+      const rootPath = RNFS.ExternalStorageDirectoryPath;
+      let foundDocs: any[] = [];
+      let foundAudio: any[] = [];
+      let foundApps: any[] = [];
+
+      const walkDir = async (dirPath: string, depth = 0) => {
+        // Limit depth to 10 for deep file discovery
+        if (depth > 10) return;
+
+        try {
+          const items = await RNFS.readDir(dirPath);
+          for (const item of items) {
+            if (item.isDirectory()) {
+              // Ignore hidden folders and system folders to keep it fast
+              if (item.name.startsWith('.') ||
+                ['Android', 'data', 'lost+found'].includes(item.name)) continue;
+
+              await walkDir(item.path, depth + 1);
+            } else if (item.isFile()) {
+              const ext = item.name.split('.').pop()?.toLowerCase() || '';
+              const fileItem = {
+                id: item.path,
+                uri: `file://${item.path}`,
+                name: item.name,
+                size: item.size,
+                type: 'document' as const,
+                mime: ext
+              };
+
+              if (['mp3', 'wav', 'm4a', 'aac', 'flac'].includes(ext)) {
+                fileItem.type = 'audio' as any;
+                foundAudio.push(fileItem);
+              } else if (['.pdf', 'doc', 'docx', 'xls', 'xlsx', 'txt', 'ppt', 'pptx'].includes(ext)) {
+                foundDocs.push(fileItem);
+              } else if (ext === 'apk') {
+                fileItem.type = 'app' as any;
+                foundApps.push(fileItem);
+              }
+            }
+          }
+        } catch (e) {
+          // Skip folders we can't access
+        }
+      };
+
+      // Start scanning from main directories for better performance than scanning everything
+      const scanRoots = rootPath ? [
+        `${rootPath}/Download`,
+        `${rootPath}/Documents`,
+        `${rootPath}/Music`,
+        `${rootPath}/Movies`,
+        `${rootPath}/WhatsApp/Media`,
+      ] : [];
+
+      for (const root of scanRoots) {
+        if (await RNFS.exists(root)) {
+          await walkDir(root);
+        }
+      }
+
+      if (foundDocs.length > 0) setDocuments(foundDocs);
+      if (foundAudio.length > 0) setAudio(foundAudio);
+      if (foundApps.length > 0) setApps(foundApps);
+
+    } catch (err) {
+      console.log('Global scan error:', err);
     }
   };
 
@@ -265,158 +341,61 @@ const SendScreen = ({ navigation, route }: any) => {
     } else {
       navigation.navigate('Sharing', { items: selectedItems });
     }
+
+    // Clear selection after small delay so transition is smooth
+    setTimeout(() => {
+      clearSelection();
+    }, 500);
   };
 
-  const renderPhotoItem = ({ item }: { item: any }) => {
-    const isSelected = selectedItems.find(i => i.id === item.id);
-    return (
-      <TouchableOpacity onPress={() => toggleSelection(item)} style={styles.gridItem}>
-        <Image source={{ uri: item.uri }} style={styles.gridImage} />
-        <View style={[styles.selectionOverlay, isSelected && { backgroundColor: isDark ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.3)' }]}>
-          <View style={[styles.checkbox, isSelected && { backgroundColor: colors.primary, borderColor: colors.primary }]}>
-            {isSelected && <Icon name="check" size={14} color="#FFF" />}
-          </View>
-        </View>
-      </TouchableOpacity>
-    );
-  };
-
-  const renderVideoItem = ({ item }: { item: any }) => {
-    const isSelected = selectedItems.find(i => i.id === item.id);
-    return (
-      <TouchableOpacity onPress={() => toggleSelection(item)} style={styles.gridItem}>
-        <Image source={{ uri: item.uri }} style={styles.gridImage} />
-        <View style={styles.videoBadge}>
-          <Icon name="play-circle-outline" size={16} color="#FFF" />
-          <Text style={styles.durationText}>{(item.duration / 60).toFixed(1)}m</Text>
-        </View>
-        <View style={[styles.selectionOverlay, isSelected && { backgroundColor: 'rgba(0,0,0,0.3)' }]}>
-          <View style={[styles.checkbox, isSelected && { backgroundColor: colors.primary, borderColor: colors.primary }]}>
-            {isSelected && <Icon name="check" size={14} color="#FFF" />}
-          </View>
-        </View>
-      </TouchableOpacity>
-    );
-  };
-
-  const renderFileItem = ({ item }: { item: any }) => {
-    const isSelected = selectedItems.find(i => i.id === item.id);
-    const getIcon = () => {
-      if (item.type === 'app') return 'android';
-      if (item.mime?.includes('pdf')) return 'file-pdf-box';
-      return 'file-document-outline';
-    };
-
-    return (
-      <TouchableOpacity 
-        onPress={() => toggleSelection(item)} 
-        style={[
-          styles.listItem,
-          {
-            backgroundColor: colors.surface,
-            borderBottomColor: colors.border
-          }
-        ]}
-      >
-        <View style={[styles.listIconBox, { backgroundColor: item.type === 'app' ? '#E8F5E9' : '#E3F2FD' }]}>
-          <Icon
-            name={item.icon || getIcon()}
-            size={28}
-            color={item.type === 'app' ? '#4CAF50' : '#2196F3'}
-          />
-        </View>
-        <View style={styles.listDetails}>
-          <Text style={[styles.listName, { color: colors.text, fontFamily: typography.fontFamily }]} numberOfLines={1}>{item.name}</Text>
-          <Text style={[styles.listSize, { color: colors.subtext, fontFamily: typography.fontFamily }]}>{formatSize(item.size)}</Text>
-        </View>
-        <View style={[styles.checkbox, isSelected && { backgroundColor: colors.primary, borderColor: colors.primary }]}>
-          {isSelected && <Icon name="check" size={14} color="#FFF" />}
-        </View>
-      </TouchableOpacity>
-    );
-  };
-
-  const renderContactItem = ({ item }: { item: any }) => {
-    const isSelected = selectedItems.find(i => i.id === item.id);
-    const initial = item.name.charAt(0).toUpperCase();
-
-    return (
-      <TouchableOpacity 
-        onPress={() => toggleSelection(item)} 
-        style={[
-          styles.listItem,
-          {
-            backgroundColor: colors.surface,
-            borderBottomColor: colors.border
-          }
-        ]}
-      >
-        <View style={[styles.listIconBox, { backgroundColor: '#F3E5F5' }]}>
-          <Text style={{ fontSize: 20, fontWeight: '700', color: '#9C27B0' }}>{initial}</Text>
-        </View>
-        <View style={styles.listDetails}>
-          <Text style={[styles.listName, { color: colors.text, fontFamily: typography.fontFamily }]} numberOfLines={1}>{item.name}</Text>
-          <Text style={[styles.listSize, { color: colors.subtext, fontFamily: typography.fontFamily }]}>
-            {item.phoneNumbers[0]?.number || 'No number'}
-          </Text>
-        </View>
-        <View style={[styles.checkbox, isSelected && { backgroundColor: colors.primary, borderColor: colors.primary }]}>
-          {isSelected && <Icon name="check" size={14} color="#FFF" />}
-        </View>
-      </TouchableOpacity>
-    );
+  const toggleDateSelection = (dateItems: any[]) => {
+    const allSelected = dateItems.every(p => selectedItems.find(i => i.id === p.id));
+    if (allSelected) {
+      const idsToRemove = new Set(dateItems.map(p => p.id));
+      setSelectedItems(selectedItems.filter(i => !idsToRemove.has(i.id)));
+    } else {
+      const newSelections = [...selectedItems];
+      dateItems.forEach(p => {
+        if (!newSelections.find(i => i.id === p.id)) {
+          newSelections.push(p);
+        }
+      });
+      setSelectedItems(newSelections);
+    }
   };
 
   const renderContent = () => {
-    if (activeTab === 'photos') return (
-      <FlatList
-        key="photos"
-        data={photos}
-        numColumns={3}
-        renderItem={renderPhotoItem}
-        keyExtractor={item => item.id}
-        contentContainerStyle={styles.gridContent}
-      />
-    );
-    if (activeTab === 'videos') return (
-      <FlatList
-        key="videos"
-        data={videos}
-        numColumns={3}
-        renderItem={renderVideoItem}
-        keyExtractor={item => item.id}
-        contentContainerStyle={styles.gridContent}
-      />
-    );
-    if (activeTab === 'contacts') return (
-      <FlatList
-        key="contacts"
-        data={contacts}
-        renderItem={renderContactItem}
-        keyExtractor={item => item.id}
-        contentContainerStyle={styles.listContent}
-      />
-    );
-    /* 
-       Merge docs and apps for simpler list view, 
-       or keep separate if needed. 
-       Here we separate by tabs. 
-    */
-    if (activeTab === 'files') return (
-      <View style={{ flex: 1 }}>
-        <TouchableOpacity style={styles.pickDocBtn} onPress={pickDocument}>
-          <Icon name="folder-plus" size={24} color={colors.primary} />
-          <Text style={[styles.pickDocText, { color: colors.primary, fontFamily: typography.fontFamily }]}>Browse Documents</Text>
-        </TouchableOpacity>
-        <FlatList
-          key="files"
-          data={[...apps, ...documents]}
-          renderItem={renderFileItem}
-          keyExtractor={item => item.id}
-          contentContainerStyle={styles.listContent}
-        />
-      </View>
-    );
+    const commonProps = {
+      selectedItems,
+      toggleSelection,
+      colors,
+      typography,
+      styles,
+    };
+
+    switch (activeTab) {
+      case 'photos':
+        return <PhotosTab {...commonProps} photos={photos} toggleDateSelection={toggleDateSelection} />;
+      case 'videos':
+        return <VideosTab {...commonProps} videos={videos} toggleDateSelection={toggleDateSelection} formatSize={formatSize} />;
+      case 'contacts':
+        return <ContactsTab {...commonProps} contacts={contacts} toggleAllSelection={toggleDateSelection} />;
+      case 'files':
+        return (
+          <FilesTab
+            {...commonProps}
+            documents={documents}
+            audio={audio}
+            apps={apps}
+            fileCategory={fileCategory}
+            setFileCategory={setFileCategory}
+            pickDocument={pickDocument}
+            formatSize={formatSize} 
+          />
+        );
+      default:
+        return null;
+    }
   };
 
   return (
@@ -538,13 +517,117 @@ const styles = StyleSheet.create({
   gridItem: { width: width / 3 - 6, height: width / 3 - 6, margin: 3, borderRadius: 8, overflow: 'hidden' },
   gridImage: { width: '100%', height: '100%' },
   selectionOverlay: { ...StyleSheet.absoluteFillObject, justifyContent: 'flex-start', alignItems: 'flex-end', padding: 8 },
-  checkbox: { width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: '#FFF', justifyContent: 'center', alignItems: 'center' },
+  checkbox: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    borderWidth: 2,
+    borderColor: '#BBB',
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.2)'
+  },
   videoBadge: { position: 'absolute', bottom: 5, left: 5, flexDirection: 'row', alignItems: 'center' },
   durationText: { color: '#FFF', fontSize: 10, marginLeft: 3 },
+  videoListItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 10,
+    paddingHorizontal: 15,
+    borderBottomWidth: 0.5,
+  },
+  videoThumbContainer: {
+    width: 100,
+    height: 60,
+    borderRadius: 8,
+    overflow: 'hidden',
+    backgroundColor: '#000',
+  },
+  videoThumb: {
+    width: '100%',
+    height: '100%',
+  },
+  videoDurationBadge: {
+    position: 'absolute',
+    bottom: 4,
+    right: 4,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    paddingHorizontal: 4,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  videoDurationText: {
+    color: '#FFF',
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  videoInfo: {
+    flex: 1,
+    marginLeft: 15,
+  },
+  videoName: {
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  videoSize: {
+    fontSize: 12,
+    marginTop: 4,
+    opacity: 0.6,
+  },
   listContent: { padding: 20, paddingBottom: 100 },
   pickDocBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: 15, marginBottom: 15, borderRadius: 12, borderWidth: 1, borderColor: '#DDD', borderStyle: 'dashed' },
   pickDocText: { fontSize: 16, fontWeight: '600', marginLeft: 10 },
-  listItem: { flexDirection: 'row', alignItems: 'center', padding: 12, marginBottom: 10, borderRadius: 16, borderBottomWidth: 1 },
+  categoryFilterRow: {
+    flexDirection: 'row',
+    paddingHorizontal: 20,
+    marginBottom: 10,
+    marginTop: 15,
+  },
+  categoryBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 20,
+    marginRight: 10,
+    backgroundColor: 'rgba(0,0,0,0.05)',
+  },
+  categoryBtnText: {
+    fontSize: 12,
+    fontWeight: '600',
+    marginLeft: 6,
+  },
+  dateSection: {
+    marginBottom: 20,
+  },
+  dateHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 15,
+    paddingVertical: 4,
+    borderBottomWidth: 1,
+    marginVertical: 8,
+  },
+  dateTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    opacity: 0.8,
+  },
+  headerCheckbox: {
+    padding: 4,
+  },
+  emptyContainer: {
+    padding: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  emptyText: {
+    marginTop: 12,
+    fontSize: 16,
+    fontWeight: '500',
+  },
+  listItem: { flexDirection: 'row', alignItems: 'center', padding: 8, marginBottom: 8, borderRadius: 16, borderBottomWidth: 1 },
   listIconBox: { width: 48, height: 48, borderRadius: 12, alignItems: 'center', justifyContent: 'center', marginRight: 15 },
   listDetails: { flex: 1 },
   listName: { fontSize: 16, fontWeight: '600' },
