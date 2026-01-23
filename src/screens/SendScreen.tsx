@@ -13,7 +13,8 @@ import {
   ActivityIndicator,
   TextInput,
   StatusBar,
-  SafeAreaView
+  SafeAreaView,
+  Modal
 } from 'react-native';
 import { CameraRoll } from "@react-native-camera-roll/camera-roll";
 import RNFS from 'react-native-fs';
@@ -57,7 +58,8 @@ const SendScreen = ({ navigation, route }: any) => {
     setLoading,
   } = useMediaStore();
   const { activeTab, permissionGranted, setActiveTab, setPermissionGranted } = useUIStore();
-  const [fileCategory, setFileCategory] = useState<'all' | 'audio' | 'docs' | 'apps'>('all');
+  const [fileCategory, setFileCategory] = useState<'audio' | 'docs' | 'apps' | 'browser'>('browser');
+  const [previewItem, setPreviewItem] = useState<any>(null);
 
   useEffect(() => {
     checkPermissions();
@@ -216,16 +218,15 @@ const SendScreen = ({ navigation, route }: any) => {
       let foundApps: any[] = [];
 
       const walkDir = async (dirPath: string, depth = 0) => {
-        // Limit depth to 10 for deep file discovery
-        if (depth > 10) return;
+        // Limit depth to 8 for performance
+        if (depth > 8) return;
 
         try {
           const items = await RNFS.readDir(dirPath);
           for (const item of items) {
             if (item.isDirectory()) {
-              // Ignore hidden folders and system folders to keep it fast
-              if (item.name.startsWith('.') ||
-                ['Android', 'data', 'lost+found'].includes(item.name)) continue;
+              // Ignore hidden folders and specific system folders
+              if (item.name.startsWith('.') || ['data', 'obb', 'lost+found'].includes(item.name)) continue;
 
               await walkDir(item.path, depth + 1);
             } else if (item.isFile()) {
@@ -242,7 +243,7 @@ const SendScreen = ({ navigation, route }: any) => {
               if (['mp3', 'wav', 'm4a', 'aac', 'flac'].includes(ext)) {
                 fileItem.type = 'audio' as any;
                 foundAudio.push(fileItem);
-              } else if (['.pdf', 'doc', 'docx', 'xls', 'xlsx', 'txt', 'ppt', 'pptx'].includes(ext)) {
+              } else if (['pdf', 'doc', 'docx', 'xls', 'xlsx', 'txt', 'ppt', 'pptx'].includes(ext)) {
                 foundDocs.push(fileItem);
               } else if (ext === 'apk') {
                 fileItem.type = 'app' as any;
@@ -255,16 +256,27 @@ const SendScreen = ({ navigation, route }: any) => {
         }
       };
 
-      // Start scanning from main directories for better performance than scanning everything
-      const scanRoots = rootPath ? [
-        `${rootPath}/Download`,
-        `${rootPath}/Documents`,
-        `${rootPath}/Music`,
-        `${rootPath}/Movies`,
-        `${rootPath}/WhatsApp/Media`,
-      ] : [];
+      // Comprehensive scan roots for modern Android
+      const scanRoots = [];
+      if (rootPath) {
+        scanRoots.push(
+          `${rootPath}/Download`,
+          `${rootPath}/Downloads`,
+          `${rootPath}/Documents`,
+          `${rootPath}/WhatsApp/Media`,
+          `${rootPath}/Android/media/com.whatsapp/WhatsApp/Media`,
+          `${rootPath}/Telegram`,
+          `${rootPath}/Bluetooth`
+        );
+      }
 
-      for (const root of scanRoots) {
+      // Add direct system paths if they exist
+      if (RNFS.DownloadDirectoryPath) scanRoots.push(RNFS.DownloadDirectoryPath);
+
+      // Filter out duplicates and nulls
+      const uniqueRoots = [...new Set(scanRoots.filter(Boolean))];
+
+      for (const root of uniqueRoots) {
         if (await RNFS.exists(root)) {
           await walkDir(root);
         }
@@ -317,19 +329,19 @@ const SendScreen = ({ navigation, route }: any) => {
     }
   };
 
-  const toggleSelection = (item: any) => {
+  const toggleSelection = useCallback((item: any) => {
     toggleItem(item);
-  };
+  }, [toggleItem]);
 
-  const formatSize = (bytes: number) => {
+  const formatSize = useCallback((bytes: number) => {
     if (!bytes) return '0 B';
     const k = 1024;
     const s = ['B', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + s[i];
-  };
+  }, []);
 
-  const handleSend = () => {
+  const handleSend = useCallback(() => {
     if (selectedItems.length === 0) return;
     
     if (isConnected) {
@@ -342,27 +354,27 @@ const SendScreen = ({ navigation, route }: any) => {
       navigation.navigate('Sharing', { items: selectedItems });
     }
 
-    // Clear selection after small delay so transition is smooth
     setTimeout(() => {
       clearSelection();
     }, 500);
-  };
+  }, [selectedItems, isConnected, navigation, clearSelection]);
 
-  const toggleDateSelection = (dateItems: any[]) => {
+  const toggleDateSelection = useCallback((dateItems: any[]) => {
     const allSelected = dateItems.every(p => selectedItems.find(i => i.id === p.id));
     if (allSelected) {
       const idsToRemove = new Set(dateItems.map(p => p.id));
       setSelectedItems(selectedItems.filter(i => !idsToRemove.has(i.id)));
     } else {
       const newSelections = [...selectedItems];
+      const selectedIds = new Set(selectedItems.map(i => i.id));
       dateItems.forEach(p => {
-        if (!newSelections.find(i => i.id === p.id)) {
+        if (!selectedIds.has(p.id)) {
           newSelections.push(p);
         }
       });
       setSelectedItems(newSelections);
     }
-  };
+  }, [selectedItems, setSelectedItems]);
 
   const renderContent = () => {
     const commonProps = {
@@ -371,6 +383,7 @@ const SendScreen = ({ navigation, route }: any) => {
       colors,
       typography,
       styles,
+      onPreview: (item: any) => setPreviewItem(item),
     };
 
     switch (activeTab) {
@@ -469,6 +482,61 @@ const SendScreen = ({ navigation, route }: any) => {
           </TouchableOpacity>
         </View>
       )}
+
+      {/* Media Preview Modal */}
+      <Modal
+        visible={!!previewItem}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setPreviewItem(null)}
+      >
+        <TouchableOpacity
+          style={styles.previewContainer}
+          activeOpacity={1}
+          onPress={() => setPreviewItem(null)}
+        >
+          <View style={styles.previewContent}>
+            <Image
+              source={{ uri: previewItem?.uri }}
+              style={styles.previewImage}
+              resizeMode="contain"
+            />
+            <TouchableOpacity
+              onPress={() => setPreviewItem(null)}
+              style={styles.closePreview}
+            >
+              <Icon name="close" size={30} color="#FFF" />
+            </TouchableOpacity>
+
+            <View style={styles.previewDetails}>
+              <Text style={styles.previewName} numberOfLines={2}>{previewItem?.name}</Text>
+              <Text style={styles.previewSize}>{formatSize(previewItem?.size)}</Text>
+            </View>
+
+            <TouchableOpacity
+              style={styles.previewSelectBtn}
+              onPress={() => {
+                toggleSelection(previewItem);
+                setPreviewItem(null);
+              }}
+            >
+              <LinearGradient
+                colors={colors.gradient}
+                style={styles.previewSelectGradient}
+              >
+                <Icon
+                  name={selectedItems.find(i => i.id === previewItem?.id) ? "check-circle" : "plus-circle"}
+                  size={20}
+                  color="#FFF"
+                />
+                <Text style={styles.previewSelectText}>
+                  {selectedItems.find(i => i.id === previewItem?.id) ? "Selected" : "Select File"}
+                </Text>
+              </LinearGradient>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
     </View>
   );
 };
@@ -514,7 +582,7 @@ const styles = StyleSheet.create({
   content: { flex: 1 },
   centerContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   gridContent: { padding: 5, paddingBottom: 100 },
-  gridItem: { width: width / 3 - 6, height: width / 3 - 6, margin: 3, borderRadius: 8, overflow: 'hidden' },
+  gridItem: { width: width / 4 - 6, height: width / 4 - 6, margin: 3, borderRadius: 8, overflow: 'hidden' },
   gridImage: { width: '100%', height: '100%' },
   selectionOverlay: { ...StyleSheet.absoluteFillObject, justifyContent: 'flex-start', alignItems: 'flex-end', padding: 8 },
   checkbox: {
@@ -638,6 +706,65 @@ const styles = StyleSheet.create({
   selectedSize: { fontSize: 13 },
   sendBtn: { flexDirection: 'row', paddingHorizontal: 24, paddingVertical: 12, borderRadius: 30, alignItems: 'center' },
   sendBtnText: { color: '#FFF', fontSize: 16, fontWeight: '700', marginRight: 8 },
+  previewContainer: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.9)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  previewContent: {
+    width: '100%',
+    height: '100%',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  previewImage: {
+    width: '90%',
+    height: '70%',
+    borderRadius: 12,
+  },
+  closePreview: {
+    position: 'absolute',
+    top: 50,
+    right: 20,
+    padding: 10,
+  },
+  previewDetails: {
+    position: 'absolute',
+    bottom: 120,
+    left: 20,
+    right: 20,
+  },
+  previewName: {
+    color: '#FFF',
+    fontSize: 16,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  previewSize: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 14,
+    textAlign: 'center',
+    marginTop: 4,
+  },
+  previewSelectBtn: {
+    position: 'absolute',
+    bottom: 50,
+    width: '60%',
+  },
+  previewSelectGradient: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    borderRadius: 30,
+    gap: 10,
+  },
+  previewSelectText: {
+    color: '#FFF',
+    fontSize: 16,
+    fontWeight: '700',
+  },
 });
 
 export default SendScreen;

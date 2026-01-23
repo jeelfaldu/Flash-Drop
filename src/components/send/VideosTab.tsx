@@ -11,6 +11,7 @@ interface VideosTabProps {
   colors: any;
   typography: any;
   styles: any;
+  onPreview: (item: any) => void;
 }
 
 export const VideosTab: React.FC<VideosTabProps> = ({
@@ -22,6 +23,7 @@ export const VideosTab: React.FC<VideosTabProps> = ({
   colors,
   typography,
   styles,
+  onPreview,
 }) => {
   const grouped = videos.reduce((acc: any, video) => {
     const date = video.timestamp ? new Date(video.timestamp * 1000).toISOString().split('T')[0] : 'Other';
@@ -40,6 +42,7 @@ export const VideosTab: React.FC<VideosTabProps> = ({
     return (
       <TouchableOpacity 
         onPress={() => toggleSelection(item)} 
+        onLongPress={() => onPreview(item)}
         style={[styles.videoListItem, { borderBottomColor: colors.border }]}
       >
         <View style={styles.videoThumbContainer}>

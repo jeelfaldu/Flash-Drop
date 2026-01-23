@@ -29,12 +29,14 @@ export const useTransferStore = create<TransferState>()(
       isTransferring: false,
       selectedItems: [],
       
-      setSelectedItems: (items) => set({ selectedItems: items }),
+      setSelectedItems: (items) => set({ selectedItems: Array.isArray(items) ? items : [] }),
       
       toggleItem: (item) => set((state) => {
-        const exists = state.selectedItems.find(i => i.id === item.id);
-        if (exists) {
-          return { selectedItems: state.selectedItems.filter(i => i.id !== item.id) };
+        const index = state.selectedItems.findIndex(i => i.id === item.id);
+        if (index > -1) {
+          const newItems = [...state.selectedItems];
+          newItems.splice(index, 1);
+          return { selectedItems: newItems };
         }
         return { selectedItems: [...state.selectedItems, item] };
       }),
