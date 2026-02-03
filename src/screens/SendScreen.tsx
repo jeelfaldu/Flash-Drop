@@ -18,7 +18,7 @@ import {
 } from 'react-native';
 import { CameraRoll } from "@react-native-camera-roll/camera-roll";
 import RNFS from 'react-native-fs';
-import DocumentPicker from 'react-native-document-picker';
+import { pick, types, isErrorWithCode, errorCodes } from '@react-native-documents/picker';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
 import LinearGradient from 'react-native-linear-gradient';
 import DeviceInfo from 'react-native-device-info';
@@ -293,8 +293,8 @@ const SendScreen = ({ navigation, route }: any) => {
 
   const pickDocument = async () => {
     try {
-      const res = await DocumentPicker.pick({
-        type: [DocumentPicker.types.allFiles],
+      const res = await pick({
+        type: [types.allFiles],
         allowMultiSelection: true
       });
       
@@ -323,7 +323,9 @@ const SendScreen = ({ navigation, route }: any) => {
       addDocuments(newDocs);
       newDocs.forEach((d: any) => toggleItem(d));
     } catch (err) {
-      if (!DocumentPicker.isCancel(err)) {
+      if (isErrorWithCode(err) && err.code === errorCodes.OPERATION_CANCELED) {
+        // user cancelled
+      } else {
         console.log(err);
       }
     }

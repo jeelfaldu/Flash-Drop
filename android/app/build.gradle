@@ -115,7 +115,7 @@ dependencies {
         implementation("com.facebook.react:hermes-android")
     } else {
         implementation project(':react-native-vector-icons')
-    implementation jscFlavor
+        implementation jscFlavor
     }
 }
 
