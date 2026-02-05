@@ -224,25 +224,51 @@ export class TransferClient {
         if (!(await RNFS.exists(saveDir))) { await RNFS.mkdir(saveDir).catch(()=>{}); }
         for (const file of files) {
             if (this.shouldStop) break;
-            try {
-                console.log(`[TransferClient] Downloading: ${file.name}`);
-                await this.downloadFile(file, ip, port, saveDir);
-                this.downloadedFiles.add(file.name + (file.size || 0));
-                console.log(`[TransferClient] Finished: ${file.name}`);
-            } catch (e) {
-                console.error(`[TransferClient] Failed to download ${file.name}:`, e);
+
+            let attempts = 0;
+            let success = false;
+
+            while(attempts < 3 && !success && !this.shouldStop) {
+                try {
+                    attempts++;
+                    console.log(`[TransferClient] Downloading: ${file.name} (Attempt ${attempts}/3)`);
+                    await this.downloadFile(file, ip, port, saveDir);
+                    this.downloadedFiles.add(file.name + (file.size || 0));
+                    console.log(`[TransferClient] Finished: ${file.name}`);
+                    success = true;
+                } catch (e) {
+                    console.error(`[TransferClient] Failed to download ${file.name} (Attempt ${attempts}):`, e);
+                    if (attempts < 3) {
+                        await new Promise(r => setTimeout(r, 1000));
+                    }
+                }
             }
         }
         this.reportStatus({ type: 'complete', message: "Batch Completed", connected: true });
     }
 
-    private downloadFile(file: any, ip: string, port: number, saveDir: string): Promise<void> {
+    private async downloadFile(file: any, ip: string, port: number, saveDir: string): Promise<void> {
+        const dest = `${saveDir}/${file.name}`;
+        let received = 0;
+        const total = file.size;
+        let startOffset = 0;
+
+        try {
+            if (await RNFS.exists(dest)) {
+                const stat = await RNFS.stat(dest);
+                if (stat.size < total) {
+                    received = stat.size;
+                    startOffset = stat.size;
+                    console.log(`[TransferClient] Resuming ${file.name} from ${startOffset}`);
+                } else {
+                    await RNFS.unlink(dest);
+                }
+            }
+        } catch(e) {}
+
         return new Promise((resolve, reject) => {
-            const dest = `${saveDir}/${file.name}`;
             let finished = false;
             let client: any = null;
-            let received = 0;
-            const total = file.size;
             let lastPct = 0;
             let inactivityTimer: any = null;
 
@@ -260,12 +286,11 @@ export class TransferClient {
                 if (client) { try { client.destroy(); client = null; } catch(e){} } 
             };
 
-            RNFS.unlink(dest).catch(() => {});
             resetWatchdog();
             
             try {
                 client = TcpSocket.createConnection({ port, host: ip }, () => {
-                    if (!finished) client.write(`GET_FILE:${file.name}`);
+                    if (!finished) client.write(`GET_FILE:${file.name}:${startOffset}`);
                 });
                 client.on('data', async (data: any) => {
                     if (finished) return;

@@ -64,8 +64,10 @@ export class TransferServer {
                     socket.write(metadata + "\n<EOF>\n");
                 } 
                 else if (msg.startsWith('GET_FILE:')) {
-                    const cleanName = msg.replace('GET_FILE:', '').trim();
-                    await this.sendFile(socket, cleanName);
+                    const parts = msg.replace('GET_FILE:', '').trim().split(':');
+                    const cleanName = parts[0];
+                    const offset = parts[1] ? parseInt(parts[1], 10) : 0;
+                    await this.sendFile(socket, cleanName, offset);
                 }
             });
 
@@ -93,7 +95,7 @@ export class TransferServer {
     console.log(`[TransferServer] Files updated. Total: ${this.filesToSend.length}`);
     }
 
-    async sendFile(socket: any, fileName: string) {
+    async sendFile(socket: any, fileName: string, initialOffset: number = 0) {
       if (!socket || socket.destroyed) return;
 
       // Find the requested file. Since we might have duplicates with same name, 
@@ -107,10 +109,10 @@ export class TransferServer {
         }
 
         try {
-          console.log(`[TransferServer] Sending file: ${file.name}`);
+          console.log(`[TransferServer] Sending file: ${file.name} from offset ${initialOffset}`);
             
           const chunkSize = 1024 * 64; 
-          let offset = 0;
+          let offset = initialOffset;
 
           let fileSize = 0;
           if (typeof file.rawSize === 'number') fileSize = file.rawSize;

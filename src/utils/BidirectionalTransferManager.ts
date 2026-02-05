@@ -78,8 +78,10 @@ export class BidirectionalTransferManager {
                 }));
                 socket.write(metadata + "\n<EOF>\n");
             } else if (msg.startsWith('GET_FILE:')) {
-                const fileName = msg.replace('GET_FILE:', '').trim();
-                await this.sendFile(socket, fileName);
+                const parts = msg.replace('GET_FILE:', '').trim().split(':');
+                const fileName = parts[0];
+                const offset = parts[1] ? parseInt(parts[1], 10) : 0;
+                await this.sendFile(socket, fileName, offset);
             }
         });
 
@@ -89,7 +91,7 @@ export class BidirectionalTransferManager {
     }
 
     // Send file to peer
-    private async sendFile(socket: any, fileName: string) {
+    private async sendFile(socket: any, fileName: string, initialOffset: number = 0) {
         const file = this.filesToSend.find(f => f.name === fileName);
         if (!file) {
             console.log('[BiTransfer] File not found:', fileName);
@@ -98,7 +100,7 @@ export class BidirectionalTransferManager {
 
         try {
             const chunkSize = 1024 * 64;
-            let offset = 0;
+            let offset = initialOffset;
             const fileSize = (typeof file.rawSize === 'number' ? file.rawSize : file.size);
             let lastReportedPercent = 0;
 
