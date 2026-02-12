@@ -32,21 +32,29 @@ const SharingScreen = ({ route, navigation }: any) => {
   const {
     ssid,
     ipAddress,
+    password,
     setConnectionDetails,
     setConnected
   } = useConnectionStore();
   const { setRole, setTransferring } = useTransferStore();
 
   // Local UI state
-    const [status, setStatus] = useState('initializing');
+  const [status, setStatus] = useState('initializing');
   const [activeTab, setActiveTab] = useState('qr');
-    const [qrData, setQrData] = useState<string>(''); 
-    const [groupInfo, setGroupInfo] = useState<any>(null);
+
+  // Derived state
+  const qrData = (ssid && ipAddress) ? JSON.stringify({
+    ssid: ssid === 'Local Network' ? null : ssid,
+    pass: ssid === 'Local Network' ? null : password,
+    ip: ipAddress
+  }) : '';
 
   const pulseAnim = useRef(new Animated.Value(0)).current;
   const rotateAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
+    setRole('sender');
+    setTransferring(false);
     setupHotspot();
     // Only stop server/group if we didn't actually connect
     return () => {
@@ -124,10 +132,13 @@ const SharingScreen = ({ route, navigation }: any) => {
           const info = await WifiP2PManager.getGroupInfoWithRetry();
 
           if (info) {
-            setGroupInfo(info);
             setConnected(true);
-            setConnectionDetails({ type: 'wifi-direct', ssid: info.ssid, ip: info.ownerIp });
-            setQrData(JSON.stringify({ ssid: info.ssid, pass: info.pass, ip: info.ownerIp }));
+            setConnectionDetails({
+              type: 'wifi-direct',
+              ssid: info.ssid,
+              ip: info.ownerIp,
+              password: info.pass
+            });
             startServer();
           } else {
             setStatus('error');
@@ -137,10 +148,13 @@ const SharingScreen = ({ route, navigation }: any) => {
           setStatus('getting_info');
           const ip = await DeviceInfo.getIpAddress();
           if (ip && ip !== '0.0.0.0' && ip !== '127.0.0.1') {
-            setGroupInfo({ ssid: 'Local Network', pass: '', ownerIp: ip });
             setConnected(true);
-            setConnectionDetails({ type: 'hotspot', ssid: 'Local Network', ip: ip });
-            setQrData(JSON.stringify({ ssid: null, pass: null, ip: ip }));
+            setConnectionDetails({
+              type: 'hotspot',
+              ssid: 'Local Network',
+              ip: ip,
+              password: ''
+            });
             startServer();
           } else {
             setStatus('error');
@@ -238,9 +252,9 @@ const SharingScreen = ({ route, navigation }: any) => {
                   </View>
                 </View>
 
-                {groupInfo?.ownerIp && (
+                {ipAddress && (
                   <Text style={[styles.diagnosticsText, { color: colors.subtext, fontFamily: typography.fontFamily }]}>
-                    Server IP: {groupInfo.ownerIp}
+                    Server IP: {ipAddress}
                   </Text>
                 )}
               </View>
@@ -255,11 +269,11 @@ const SharingScreen = ({ route, navigation }: any) => {
                         <Text style={[styles.qrHint, { color: colors.subtext, fontFamily: typography.fontFamily }]}>
                           Ask the receiver to scan this QR code
                         </Text>
-                        {groupInfo && groupInfo.ssid && (
+                        {ssid && (
                           <View style={[styles.manualInfo, { backgroundColor: colors.background }]}>
                             <Text style={[styles.manualTitle, { color: colors.text, fontFamily: typography.fontFamily }]}>Manual Connection</Text>
-                            <Text style={[styles.manualText, { color: colors.primary, fontFamily: typography.fontFamily }]}>SSID: {groupInfo.ssid}</Text>
-                            <Text style={[styles.manualText, { color: colors.primary, fontFamily: typography.fontFamily }]}>Pass: {groupInfo.pass}</Text>
+                            <Text style={[styles.manualText, { color: colors.primary, fontFamily: typography.fontFamily }]}>SSID: {ssid}</Text>
+                            <Text style={[styles.manualText, { color: colors.primary, fontFamily: typography.fontFamily }]}>Pass: {password}</Text>
                           </View>
                         )}
                       </>
