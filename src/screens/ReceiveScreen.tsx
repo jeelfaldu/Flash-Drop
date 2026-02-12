@@ -24,16 +24,9 @@ import WifiP2PManager from '../utils/WifiP2PManager';
 import RNFS from 'react-native-fs';
 import { useNavigation } from '@react-navigation/native';
 import { useTheme } from '../theme/ThemeContext';
-import { useConnectionStore, useUIStore } from '../store';
+import { useConnectionStore, useUIStore, useTransferStore } from '../store';
 
 const { width } = Dimensions.get('window');
-
-interface TransferringFile {
-    name: string;
-    size: number;
-    progress: number;
-    status: 'pending' | 'downloading' | 'completed' | 'error';
-}
 
 const ReceiveScreen = () => {
   const navigation = useNavigation();
@@ -44,25 +37,28 @@ const ReceiveScreen = () => {
     isConnected,
     ipAddress,
     ssid,
+    status: connectionStatus,
+    connectionLog,
     setConnected,
-    setConnectionDetails
+    setConnectionDetails,
+    setStatus,
+    setLog
   } = useConnectionStore();
+
+  const { setupListeners } = useTransferStore();
 
   // Local state (UI-specific, not persisted)
   const [activeTab, setActiveTab] = useState<'nearby' | 'qr'>('qr');
   const [hasPermission, setHasPermission] = useState(false);
   const [wifiList, setWifiList] = useState<any[]>([]);
-  const [connectionStatus, setConnectionStatus] = useState<string>('idle'); 
-  const [transferringFiles, setTransferringFiles] = useState<Record<string, TransferringFile>>({});
-  const [localIp, setLocalIp] = useState('');
-  const [connectionLog, setConnectionLog] = useState('');
   
   const device = useCameraDevice('back');
   const scanLineAnim = useRef(new Animated.Value(0)).current;
   const rotateAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
-    if (isConnected && ipAddress) {
+    // If we are already connected, navigate to transfer screen
+    if (isConnected && connectionStatus === 'connected') {
       (navigation as any).navigate('FileTransfer', {
         role: 'receiver',
         deviceName: ssid || 'Sender',
@@ -71,18 +67,20 @@ const ReceiveScreen = () => {
       return;
     }
 
+    // Reset previous transfer session if not connected
+    useTransferStore.getState().resetTransfer();
+
     (async () => {
       const status = await Camera.requestCameraPermission();
       setHasPermission(status === 'granted');
       DeviceInfo.getIpAddress().then((ip) => {
-        setLocalIp(ip);
         setConnectionDetails({ type: null, ip });
       });
       startWifiScan();
     })();
     // Cleanup handled explicitly via disconnect or app close
     return () => { };
-  }, []);
+  }, [isConnected, connectionStatus]);
 
   useEffect(() => {
     if (activeTab === 'qr') startQRAnimation();
@@ -127,24 +125,23 @@ const ReceiveScreen = () => {
   });
 
   const connectToHotspot = async (ssid: string, password?: string, ip?: string) => {
-    setConnectionStatus('connecting');
-    setConnectionLog('Connecting to Hotspot...');
+    setStatus('connecting');
+    setLog('Connecting to Hotspot...');
     try {
         if (ssid) {
           await WifiP2PManager.connectToSSID(ssid, password);
-          setConnectionLog('Wi-Fi connected. Fetching network IP...');
+          setLog('Wi-Fi connected. Fetching network IP...');
           await new Promise(r => setTimeout(r, 4000));
 
           // Update Zustand store
           setConnectionDetails({ type: 'hotspot', ssid, ip: ip || '' });
         }
       DeviceInfo.getIpAddress().then((newIp) => {
-        setLocalIp(newIp);
         setConnectionDetails({ type: 'hotspot', ssid, ip: newIp });
       });
         connectToTransferServer(ssid, ip);
     } catch (e) {
-        setConnectionStatus('error');
+        setStatus('error');
       Alert.alert("Error", "Connection failed. Please connect manually in Settings.");
     }
   };
@@ -155,14 +152,10 @@ const ReceiveScreen = () => {
       ? `${RNFS.ExternalDirectoryPath}/FlashDrop`
       : `${RNFS.DocumentDirectoryPath}/FlashDrop`;
 
-    TransferClient.onStatus = (status: TransferStatus) => {
-      if (status.type === 'log') setConnectionLog(status.message || '');
-      if (status.type === 'connection' && status.connected) {
-        setConnected(true);
-        setConnectionStatus('connected');
-        (navigation as any).navigate('FileTransfer', { role: 'receiver', deviceName: ssid || 'Sender', initialFiles: [] });
-      }
-    };
+    // Initialize listeners in store to handle status updates
+    useTransferStore.getState().setupListeners('receiver');
+
+    // Start the client
     TransferClient.start(8888, downloadDir, ip);
   };
 
@@ -316,7 +309,7 @@ const ReceiveScreen = () => {
             <ActivityIndicator size="large" color={colors.primary} />
             <Text style={[styles.loadingTitle, { color: colors.text }]}>Connecting</Text>
             <Text style={[styles.loadingLog, { color: colors.subtext }]}>{connectionLog}</Text>
-            <TouchableOpacity style={[styles.cancelBtn, { backgroundColor: colors.border }]} onPress={() => { TransferClient.stop(); setConnectionStatus('idle'); }}>
+            <TouchableOpacity style={[styles.cancelBtn, { backgroundColor: colors.border }]} onPress={() => { TransferClient.stop(); setStatus('idle'); }}>
               <Text style={{ color: colors.text }}>Cancel</Text>
             </TouchableOpacity>
           </View>
