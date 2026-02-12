@@ -99,9 +99,9 @@ export class TransferClient {
         const ips = Array.from(ipSet).filter(ip => ip && ip !== '0.0.0.0').slice(-20); // Keep set reasonable
         this.reportStatus({ type: 'log', message: `Discovery [${attempt}/40]...`, connected: false });
 
-        for (let i = 0; i < ips.length; i += 2) {
+        for (let i = 0; i < ips.length; i += 10) {
             if (this.shouldStop) break;
-            const batch = ips.slice(i, i + 2);
+            const batch = ips.slice(i, i + 10);
             const results = await Promise.all(batch.map(ip => this.trySingleIp(ip, port)));
             const foundIdx = results.findIndex(r => r === true);
             
