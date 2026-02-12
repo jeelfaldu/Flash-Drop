@@ -1,6 +1,17 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import TransferClient, { TransferStatus } from '../utils/TransferClient';
+import TransferServer, { ServerStatus } from '../utils/TransferServer';
+
+export interface FileItem {
+  name: string;
+  size: number;
+  progress: number;
+  status: 'pending' | 'transferring' | 'completed' | 'error';
+  type?: string;
+  uri?: string;
+}
 
 // Transfer State Store
 interface TransferState {
@@ -16,18 +27,29 @@ interface TransferState {
   clearSelection: () => void;
   
   // Transfer session
+  transferringFiles: Record<string, FileItem>;
   setRole: (role: 'sender' | 'receiver' | null, deviceName?: string) => void;
   setTransferring: (status: boolean) => void;
   resetTransfer: () => void;
+
+  // File tracking
+  addFile: (file: FileItem) => void;
+  updateFileProgress: (name: string, progress: number, status?: FileItem['status']) => void;
+  setFiles: (files: Record<string, FileItem>) => void;
+
+  // Listeners
+  setupListeners: (role: 'sender' | 'receiver') => void;
+  cleanupListeners: () => void;
 }
 
 export const useTransferStore = create<TransferState>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       role: null,
       deviceName: '',
       isTransferring: false,
       selectedItems: [],
+      transferringFiles: {},
       
       setSelectedItems: (items) => set({ selectedItems: Array.isArray(items) ? items : [] }),
       
@@ -47,16 +69,107 @@ export const useTransferStore = create<TransferState>()(
       
       setTransferring: (status) => set({ isTransferring: status }),
       
-      resetTransfer: () => set({
-        role: null,
-        deviceName: '',
-        isTransferring: false,
-        selectedItems: []
+      resetTransfer: () => {
+        get().cleanupListeners();
+        set({
+          role: null,
+          deviceName: '',
+          isTransferring: false,
+          selectedItems: [],
+          transferringFiles: {}
+        });
+      },
+
+      addFile: (file) => set((state) => ({
+        transferringFiles: { ...state.transferringFiles, [file.name]: file }
+      })),
+
+      updateFileProgress: (name, progress, status) => set((state) => {
+        const file = state.transferringFiles[name];
+        if (!file) return state;
+
+        return {
+          transferringFiles: {
+            ...state.transferringFiles,
+            [name]: {
+              ...file,
+              progress,
+              status: status || (progress >= 1 ? 'completed' : 'transferring')
+            }
+          }
+        };
       }),
+
+      setFiles: (files) => set({ transferringFiles: files }),
+
+      setupListeners: (role) => {
+        const { updateFileProgress } = get();
+        const { setStatus, setLog, setConnected } = useConnectionStore.getState();
+
+        if (role === 'receiver') {
+          TransferClient.onStatus = (status: TransferStatus) => {
+            if (status.type === 'log') {
+              setLog(status.message || '');
+            } else if (status.type === 'connection') {
+              setConnected(status.connected);
+              setStatus(status.connected ? 'connected' : 'idle');
+              if (status.message) setLog(status.message);
+            } else if (status.type === 'progress' && status.fileProgress) {
+              updateFileProgress(
+                status.fileProgress.name,
+                status.fileProgress.percent / 100
+              );
+            } else if (status.files) {
+               // Initial metadata received
+               const newFiles: Record<string, FileItem> = {};
+               status.files.forEach((f: any) => {
+                 newFiles[f.name] = {
+                   name: f.name,
+                   size: f.size,
+                   progress: 0,
+                   status: 'pending',
+                   type: f.type
+                 };
+               });
+               // Merge with existing to avoid overwriting if partial updates
+               set((state) => ({
+                 transferringFiles: { ...state.transferringFiles, ...newFiles }
+               }));
+            }
+          };
+        } else if (role === 'sender') {
+          TransferServer.statusCallback = (status: ServerStatus) => {
+             if (status.type === 'client_connected') {
+               setStatus('connected');
+               setConnected(true);
+               if (status.clientAddress) setLog(`Client connected: ${status.clientAddress}`);
+             } else if (status.type === 'error') {
+               setStatus('error');
+               if (status.message) setLog(status.message);
+             } else if (status.type === 'progress' && status.fileProgress) {
+               updateFileProgress(
+                 status.fileProgress.name,
+                 status.fileProgress.percent / 100
+               );
+             }
+          };
+        }
+      },
+
+      cleanupListeners: () => {
+        TransferClient.onStatus = undefined;
+        TransferServer.statusCallback = undefined;
+      }
     }),
     {
       name: 'transfer-storage',
       storage: createJSONStorage(() => AsyncStorage),
+      partialize: (state) => ({
+        // Only persist these fields
+        selectedItems: state.selectedItems,
+        role: state.role,
+        deviceName: state.deviceName
+      }),
     }
   )
 );
@@ -64,11 +177,15 @@ export const useTransferStore = create<TransferState>()(
 // Connection State Store
 interface ConnectionState {
   isConnected: boolean;
+  status: 'idle' | 'connecting' | 'connected' | 'error';
   connectionType: 'wifi-direct' | 'hotspot' | null;
   ipAddress: string;
   ssid: string;
+  connectionLog: string;
   
   setConnected: (connected: boolean) => void;
+  setStatus: (status: 'idle' | 'connecting' | 'connected' | 'error') => void;
+  setLog: (log: string) => void;
   setConnectionDetails: (details: {
     type: 'wifi-direct' | 'hotspot' | null;
     ip?: string;
@@ -81,11 +198,15 @@ export const useConnectionStore = create<ConnectionState>()(
   persist(
     (set) => ({
       isConnected: false,
+      status: 'idle',
       connectionType: null,
       ipAddress: '',
       ssid: '',
+      connectionLog: '',
       
       setConnected: (connected) => set({ isConnected: connected }),
+      setStatus: (status) => set({ status }),
+      setLog: (log) => set({ connectionLog: log }),
       
       setConnectionDetails: (details) => set({
         connectionType: details.type,
@@ -95,14 +216,23 @@ export const useConnectionStore = create<ConnectionState>()(
       
       resetConnection: () => set({
         isConnected: false,
+        status: 'idle',
         connectionType: null,
         ipAddress: '',
-        ssid: ''
+        ssid: '',
+        connectionLog: ''
       }),
     }),
     {
       name: 'connection-storage',
       storage: createJSONStorage(() => AsyncStorage),
+      partialize: (state) => ({
+        // Don't persist logs or transient status usually, but maybe helpful for debugging.
+        // Let's persist basic details.
+        connectionType: state.connectionType,
+        ipAddress: state.ipAddress,
+        ssid: state.ssid
+      })
     }
   )
 );
@@ -192,4 +322,3 @@ export const useUIStore = create<UIState>()(
     }
   )
 );
-

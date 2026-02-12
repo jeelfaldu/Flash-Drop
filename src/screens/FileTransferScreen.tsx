@@ -19,17 +19,9 @@ import TransferServer from '../utils/TransferServer';
 import TransferClient, { TransferStatus } from '../utils/TransferClient';
 import NotificationService from '../utils/NotificationService';
 import { useTheme } from '../theme/ThemeContext';
-import { useTransferStore } from '../store';
+import { useTransferStore, FileItem } from '../store';
 
 const { width } = Dimensions.get('window');
-
-interface FileItem {
-    name: string;
-    size: number;
-    progress: number;
-    status: 'pending' | 'transferring' | 'completed' | 'error';
-    type?: string;
-}
 
 const FileTransferScreen = () => {
     const navigation = useNavigation();
@@ -38,9 +30,15 @@ const FileTransferScreen = () => {
     const { role, deviceName, initialFiles } = route.params as any; // role: 'sender' | 'receiver'
 
   // Zustand store
-  const { setRole: setTransferRole, setTransferring } = useTransferStore();
+  const {
+    setRole: setTransferRole,
+    setTransferring,
+    transferringFiles: files,
+    setupListeners,
+    cleanupListeners,
+    setFiles
+  } = useTransferStore();
 
-    const [files, setFiles] = useState<Record<string, FileItem>>({});
     const [stats, setStats] = useState({
         totalSize: 0,
         transferredSize: 0,
@@ -52,152 +50,101 @@ const FileTransferScreen = () => {
       lastTransferredSize: 0
     });
 
-  // Update Zustand store with role
+  // Update Zustand store with role and setup listeners
   useEffect(() => {
     setTransferRole(role, deviceName);
     setTransferring(true);
+    setupListeners(role);
 
-    return () => {
-      setTransferring(false);
-    };
-  }, [role, deviceName]);
-
-    useEffect(() => {
-        // Initialize files from navigation params if available
-      if (initialFiles && Array.isArray(initialFiles)) {
-        setFiles(prev => {
-          const updated = { ...prev };
-          initialFiles.forEach((f: any) => {
+    // Initialize files from navigation params if available
+    if (initialFiles && Array.isArray(initialFiles)) {
+        const initialFileMap: Record<string, FileItem> = {};
+        initialFiles.forEach((f: any) => {
             const size = typeof f.rawSize === 'number' ? f.rawSize : (f.size || 0);
-            if (!updated[f.name]) {
-              updated[f.name] = {
+            initialFileMap[f.name] = {
                 name: f.name,
                 size: size,
                 progress: 0,
                 status: 'pending',
-                type: f.type
-              };
-            }
-          });
-
-          // Recalculate total size from all files
-          const allFiles = Object.values(updated);
-          const grandTotal = allFiles.reduce((acc, f) => acc + f.size, 0);
-          setStats(s => ({ ...s, totalSize: grandTotal }));
-
-          return updated;
-        });
-        }
-
-        updateSpaceStats();
-
-        // Subscribe to progress updates
-        if (role === 'sender') {
-            TransferServer.statusCallback = (status) => {
-                if (status.type === 'progress' && status.fileProgress) {
-                    updateFileProgress(status.fileProgress.name, status.fileProgress.percent, status.fileProgress.sent);
-                }
+                type: f.type,
+                uri: f.uri
             };
-        } else {
-            // Receiver: Hook into TransferClient which is already started in ReceiveScreen
-          TransferClient.onStatus = (status: TransferStatus) => {
-                if (status.type === 'progress' && status.fileProgress) {
-                    updateFileProgress(status.fileProgress.name, status.fileProgress.percent, status.fileProgress.received);
-                } else if (status.files) {
-                    // Update metadata
-                    setFiles(prev => {
-                        const updated = { ...prev };
-                      (status.files as any[]).forEach((f: any) => {
-                            if (!updated[f.name]) {
-                                updated[f.name] = {
-                                    name: f.name,
-                                    size: f.size,
-                                    progress: 0,
-                                    status: 'pending',
-                                    type: f.type
-                                };
-                            }
-                        });
-                        return updated;
-                    });
-                }
-          };
-        }
-
-        return () => {
-            if (role === 'sender') {
-                TransferServer.statusCallback = undefined;
-            } else {
-              TransferClient.onStatus = undefined;
-            }
-        };
-    }, []);
-
-    const updateFileProgress = (name: string, percent: number, currentSize: number) => {
-        setFiles(prev => {
-            const updated = { ...prev };
-            if (updated[name]) {
-                updated[name] = {
-                    ...updated[name],
-                    progress: percent / 100,
-                    status: percent === 100 ? 'completed' : 'transferring'
-                };
-            } else {
-                // New file found during transfer (metadata update)
-                updated[name] = {
-                    name,
-                    size: 0, // We might not know the exact size yet if it's dynamic
-                    progress: percent / 100,
-                    status: 'transferring'
-                };
-            }
-            
-            // Calculate overall progress
-            const allFiles = Object.values(updated);
-            const totalTransferred = allFiles.reduce((acc, f) => acc + (f.size * f.progress), 0);
-            const totalSize = allFiles.reduce((acc, f) => acc + f.size, 0);
-            
-          setStats(prev => {
-            const now = Date.now();
-            const timeDiff = (now - prev.lastUpdateTime) / 1000; // seconds
-            const bytesDiff = totalTransferred - prev.lastTransferredSize;
-
-            let speed = '0 KB/s';
-            if (timeDiff > 0 && bytesDiff > 0) {
-              const bytesPerSecond = bytesDiff / timeDiff;
-              if (bytesPerSecond > 1024 * 1024) {
-                speed = (bytesPerSecond / (1024 * 1024)).toFixed(2) + ' MB/s';
-              } else {
-                speed = (bytesPerSecond / 1024).toFixed(2) + ' KB/s';
-              }
-            }
-
-            const progress = totalSize > 0 ? totalTransferred / totalSize : 0;
-
-            // Show notification (throttled to approx once per second)
-            if (now - prev.lastUpdateTime > 1000 || progress === 1) {
-              if (progress === 1) {
-                NotificationService.displayCompleteNotification(name, true);
-              } else {
-                NotificationService.displayTransferNotification(name, progress, role === 'sender');
-              }
-            }
-
-            return {
-              ...prev,
-              transferredSize: totalTransferred,
-              totalSize: totalSize,
-              overallProgress: progress,
-              leftData: formatSize(totalSize - totalTransferred),
-              transferSpeed: speed,
-              lastUpdateTime: now,
-              lastTransferredSize: totalTransferred
-            };
-          });
-
-            return updated;
         });
+        // We merge with existing or set new? Usually set new for a new session.
+        // But if we come from ReceiveScreen, it's empty.
+        // If we keep connection, we might want to merge.
+        // For simplicity and safety, let's merge into current if any, or just set if empty.
+        // But wait, setFiles overwrites.
+        if (Object.keys(initialFileMap).length > 0) {
+             setFiles(initialFileMap);
+        }
+    }
+
+    updateSpaceStats();
+
+    return () => {
+      setTransferring(false);
+      cleanupListeners();
     };
+  }, [role, deviceName]);
+
+  // Effect to calculate stats and notifications when files change
+  useEffect(() => {
+    const allFiles = Object.values(files);
+    const totalTransferred = allFiles.reduce((acc, f) => acc + (f.size * f.progress), 0);
+    const totalSize = allFiles.reduce((acc, f) => acc + f.size, 0);
+
+    setStats(prev => {
+        const now = Date.now();
+        const timeDiff = (now - prev.lastUpdateTime) / 1000; // seconds
+        const bytesDiff = totalTransferred - prev.lastTransferredSize;
+
+        let speed = '0 KB/s';
+        // Only update speed if time diff is significant to avoid jitter or div by zero
+        if (timeDiff > 0.5 && bytesDiff >= 0) {
+            const bytesPerSecond = bytesDiff / timeDiff;
+            if (bytesPerSecond > 1024 * 1024) {
+                speed = (bytesPerSecond / (1024 * 1024)).toFixed(2) + ' MB/s';
+            } else {
+                speed = (bytesPerSecond / 1024).toFixed(2) + ' KB/s';
+            }
+        } else {
+             // Keep previous speed if update is too fast
+             speed = prev.transferSpeed;
+        }
+
+        const progress = totalSize > 0 ? totalTransferred / totalSize : 0;
+
+        // Find recently completed or updated file for notification (simplified)
+        // Ideally we should track which file triggered the update.
+        // For now, we rely on throttled updates.
+
+        if (now - prev.lastUpdateTime > 1000 || progress === 1) {
+             // We don't have the specific file name here easily without diffing.
+             // NotificationService might be better handled in the store actions or listener.
+             // But existing code did it here.
+             // Let's iterate to find active file?
+             const activeFile = allFiles.find(f => f.status === 'transferring');
+             if (activeFile) {
+                 NotificationService.displayTransferNotification(activeFile.name, activeFile.progress, role === 'sender');
+             } else if (progress === 1 && prev.overallProgress < 1) {
+                 NotificationService.displayCompleteNotification("All files", true);
+             }
+        }
+
+        return {
+            ...prev,
+            transferredSize: totalTransferred,
+            totalSize: totalSize,
+            overallProgress: progress,
+            leftData: formatSize(totalSize - totalTransferred),
+            transferSpeed: speed,
+            lastUpdateTime: now,
+            lastTransferredSize: totalTransferred
+        };
+    });
+
+  }, [files]); // React to file updates
 
     const updateSpaceStats = async () => {
         try {
