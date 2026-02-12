@@ -16,9 +16,9 @@ import {
   SafeAreaView,
   Modal
 } from 'react-native';
-import { CameraRoll } from "@react-native-camera-roll/camera-roll";
 import RNFS from 'react-native-fs';
 import { pick, types, isErrorWithCode, errorCodes } from '@react-native-documents/picker';
+import { getPhotosWithSizes, getVideosWithSizes } from '../utils/MediaLoader';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
 import LinearGradient from 'react-native-linear-gradient';
 import DeviceInfo from 'react-native-device-info';
@@ -126,73 +126,10 @@ const SendScreen = ({ navigation, route }: any) => {
   const loadMedia = async () => {
     setLoading(true);
     try {
-      const photosData = await CameraRoll.getPhotos({
-        first: 100,
-        assetType: 'Photos',
-        include: ['fileSize', 'filename', 'imageSize']
-      });
-      const videoData = await CameraRoll.getPhotos({
-        first: 50,
-        assetType: 'Videos',
-        include: ['fileSize', 'filename', 'playableDuration']
-      });
-
-
-      // Get actual file sizes using RNFS
-      const photosWithSize = await Promise.all(
-        photosData.edges.map(async (e) => {
-          const uri = e.node.image.uri;
-          let size = e.node.image.fileSize || 0;
-          let filePath = e.node.image.filepath || uri;
-
-          if (size === 0) {
-            try {
-              const stat = await RNFS.stat(uri);
-              size = stat.size;
-            } catch (err) {
-              console.log('Could not stat photo:', uri, err);
-            }
-          }
-
-          return {
-            id: uri,
-            uri: uri,
-            type: 'image',
-            folderPath: filePath,
-            name: e.node.image.filename || `IMG_${Date.now()}.jpg`,
-            size: size,
-            timestamp: e.node.timestamp
-          };
-        })
-      );
-
-      const videosWithSize = await Promise.all(
-        videoData.edges.map(async (e) => {
-          const uri = e.node.image.uri;
-          let size = e.node.image.fileSize || 0;
-          let filePath = e.node.image.filepath || uri;
-
-          if (size === 0) {
-            try {
-              const stat = await RNFS.stat(uri);
-              size = stat.size;
-            } catch (err) {
-              console.log('Could not stat video:', uri, err);
-            }
-          }
-
-          return {
-            id: uri,
-            uri: uri,
-            type: 'video',
-            folderPath: filePath,
-            name: e.node.image.filename || `VID_${Date.now()}.mp4`,
-            size: size,
-            duration: e.node.image.playableDuration,
-            timestamp: e.node.timestamp
-          };
-        })
-      );
+      const [photosWithSize, videosWithSize] = await Promise.all([
+        getPhotosWithSizes(100),
+        getVideosWithSizes(50)
+      ]);
 
       setPhotos(photosWithSize);
       setVideos(videosWithSize);
