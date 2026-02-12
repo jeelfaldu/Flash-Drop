@@ -67,12 +67,14 @@ interface ConnectionState {
   connectionType: 'wifi-direct' | 'hotspot' | null;
   ipAddress: string;
   ssid: string;
+  password?: string;
   
   setConnected: (connected: boolean) => void;
   setConnectionDetails: (details: {
     type: 'wifi-direct' | 'hotspot' | null;
     ip?: string;
     ssid?: string;
+    password?: string;
   }) => void;
   resetConnection: () => void;
 }
@@ -84,20 +86,23 @@ export const useConnectionStore = create<ConnectionState>()(
       connectionType: null,
       ipAddress: '',
       ssid: '',
+      password: '',
       
       setConnected: (connected) => set({ isConnected: connected }),
       
       setConnectionDetails: (details) => set({
         connectionType: details.type,
         ipAddress: details.ip || '',
-        ssid: details.ssid || ''
+        ssid: details.ssid || '',
+        password: details.password || ''
       }),
       
       resetConnection: () => set({
         isConnected: false,
         connectionType: null,
         ipAddress: '',
-        ssid: ''
+        ssid: '',
+        password: ''
       }),
     }),
     {
