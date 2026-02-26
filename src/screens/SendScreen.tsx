@@ -26,6 +26,7 @@ import Contacts from 'react-native-contacts';
 import { useFocusEffect } from '@react-navigation/native';
 import { useTheme } from '../theme/ThemeContext';
 import { useTransferStore, useMediaStore, useUIStore, useConnectionStore } from '../store';
+import { loadAssetSizes, processInChunks } from '../utils/MediaLoader';
 
 import { PhotosTab } from '../components/send/PhotosTab';
 import { VideosTab } from '../components/send/VideosTab';
@@ -138,61 +139,9 @@ const SendScreen = ({ navigation, route }: any) => {
       });
 
 
-      // Get actual file sizes using RNFS
-      const photosWithSize = await Promise.all(
-        photosData.edges.map(async (e) => {
-          const uri = e.node.image.uri;
-          let size = e.node.image.fileSize || 0;
-          let filePath = e.node.image.filepath || uri;
-
-          if (size === 0) {
-            try {
-              const stat = await RNFS.stat(uri);
-              size = stat.size;
-            } catch (err) {
-              console.log('Could not stat photo:', uri, err);
-            }
-          }
-
-          return {
-            id: uri,
-            uri: uri,
-            type: 'image',
-            folderPath: filePath,
-            name: e.node.image.filename || `IMG_${Date.now()}.jpg`,
-            size: size,
-            timestamp: e.node.timestamp
-          };
-        })
-      );
-
-      const videosWithSize = await Promise.all(
-        videoData.edges.map(async (e) => {
-          const uri = e.node.image.uri;
-          let size = e.node.image.fileSize || 0;
-          let filePath = e.node.image.filepath || uri;
-
-          if (size === 0) {
-            try {
-              const stat = await RNFS.stat(uri);
-              size = stat.size;
-            } catch (err) {
-              console.log('Could not stat video:', uri, err);
-            }
-          }
-
-          return {
-            id: uri,
-            uri: uri,
-            type: 'video',
-            folderPath: filePath,
-            name: e.node.image.filename || `VID_${Date.now()}.mp4`,
-            size: size,
-            duration: e.node.image.playableDuration,
-            timestamp: e.node.timestamp
-          };
-        })
-      );
+      // Get actual file sizes using RNFS with chunked processing
+      const photosWithSize = await loadAssetSizes(photosData.edges, 'image');
+      const videosWithSize = await loadAssetSizes(videoData.edges, 'video');
 
       setPhotos(photosWithSize);
       setVideos(videosWithSize);
@@ -298,7 +247,7 @@ const SendScreen = ({ navigation, route }: any) => {
         allowMultiSelection: true
       });
       
-      const newDocs = await Promise.all(res.map(async (doc) => {
+      const newDocs = await processInChunks(res, 5, async (doc) => {
         let size = doc.size || 0;
 
         if (size === 0) {
@@ -318,7 +267,7 @@ const SendScreen = ({ navigation, route }: any) => {
           type: 'document',
           mime: doc.type
         };
-      }));
+      });
 
       addDocuments(newDocs);
       newDocs.forEach((d: any) => toggleItem(d));
