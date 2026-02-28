@@ -1,159 +1,133 @@
-import React, { useRef, useEffect } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
-  Animated,
-  Dimensions,
-  Platform
-} from 'react-native';
+import React, { useEffect, useState, useRef } from 'react';
+import { View, Text, TouchableOpacity, StyleSheet, Animated, Platform } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
-import LinearGradient from 'react-native-linear-gradient';
 import { useTransferStore } from '../store';
-import { useConnectionStore } from '../store';
 import { useTheme } from '../theme/ThemeContext';
 import { navigationRef } from '../../App';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
-const { width } = Dimensions.get('window');
-
-const GlobalTransferOverlay = () => {
-  const { colors, layout } = useTheme();
+export const GlobalTransferOverlay = () => {
   const { isTransferring, transferStats, role, deviceName } = useTransferStore();
-  const { isConnected } = useConnectionStore();
-  const [currentRoute, setCurrentRoute] = React.useState<string | null>(null);
+  const { colors, typography, isDark, layout } = useTheme();
 
-  // Animation values
-  const slideAnim = useRef(new Animated.Value(100)).current; // start off-screen (below)
-  const opacityAnim = useRef(new Animated.Value(0)).current;
+  const translateY = useRef(new Animated.Value(150)).current;
+  const [currentRoute, setCurrentRoute] = useState('');
 
-  // Track current route for hiding overlay on FileTransfer screen
+  // Subscribe to navigation state changes
   useEffect(() => {
-    const updateRoute = () => {
-      try {
-        if (navigationRef.isReady()) {
-          const route = navigationRef.getCurrentRoute();
-          setCurrentRoute(route ? route.name : null);
-        }
-      } catch (_) { }
+    const checkRoute = () => {
+      if (navigationRef.isReady()) {
+        setCurrentRoute(navigationRef.getCurrentRoute()?.name || '');
+      }
     };
 
-    updateRoute();
+    // Check initially
+    checkRoute();
 
-    // Use navigation listener instead of polling
-    let unsubscribe: (() => void) | undefined;
-    if (navigationRef.isReady()) {
-      unsubscribe = navigationRef.addListener('state', updateRoute);
-    }
-
-    return () => {
-      if (unsubscribe) unsubscribe();
-    };
+    // Polling is a fallback; `addListener` doesn't exist on navigationRef in the same way 
+    // but React Navigation suggests using `onStateChange` on NavigationContainer.
+    // For a drop-in component, polling is safe and cheap since it's just checking a ref.
+    const interval = setInterval(checkRoute, 500);
+    return () => clearInterval(interval);
   }, []);
 
-  // Determine whether overlay should be visible
-  const progress = transferStats?.overallProgress ?? 0;
-  const isCompleted = progress >= 1 && progress > 0;
-  const onTransferScreen = currentRoute === 'FileTransfer';
-  // Guard: only show if actively transferring AND actually connected to a device
-  const shouldShow = isTransferring && isConnected && !onTransferScreen && !isCompleted;
+  // Determine visibility
+  const shouldShow = isTransferring && currentRoute !== 'FileTransfer';
 
-  // Animate in/out
   useEffect(() => {
     if (shouldShow) {
-      Animated.parallel([
-        Animated.spring(slideAnim, {
-          toValue: 0,
-          useNativeDriver: true,
-          tension: 60,
-          friction: 10,
-        }),
-        Animated.timing(opacityAnim, {
-          toValue: 1,
-          duration: 250,
-          useNativeDriver: true,
-        }),
-      ]).start();
+      Animated.spring(translateY, {
+        toValue: 0,
+        friction: 8,
+        useNativeDriver: true,
+      }).start();
     } else {
-      Animated.parallel([
-        Animated.timing(slideAnim, {
-          toValue: 100,
-          duration: 200,
-          useNativeDriver: true,
-        }),
-        Animated.timing(opacityAnim, {
-          toValue: 0,
-          duration: 200,
-          useNativeDriver: true,
-        }),
-      ]).start();
+      Animated.timing(translateY, {
+        toValue: 150,
+        duration: 300,
+        useNativeDriver: true,
+      }).start();
     }
-  }, [shouldShow]);
+  }, [shouldShow, translateY]);
 
-  if (!isTransferring) return null; // Don't render at all if not transferring
+  if (!shouldShow && currentRoute === 'FileTransfer') {
+    // Don't render if it's not showing AND we are on FileTransfer to save performance
+    // However, keeping it around for the animation out is good.
+  }
 
-  const progressPct = Math.round(progress * 100);
-  return null;
+  const handlePress = () => {
+    if (navigationRef.isReady()) {
+      navigationRef.navigate('FileTransfer' as never);
+    }
+  };
+
+  const isSending = role === 'sender';
+  const accentColor = isSending ? colors.primary : colors.secondary;
+
   return (
     <Animated.View
-      pointerEvents={shouldShow ? 'auto' : 'none'}
       style={[
         styles.container,
         {
-          bottom: Platform.OS === 'ios' ? 40 : 20,
-          transform: [{ translateY: slideAnim }],
-          opacity: opacityAnim,
+          transform: [{ translateY }],
+          paddingBottom: Platform.OS === 'ios' ? 24 : 16,
         },
       ]}
+      pointerEvents={shouldShow ? 'box-none' : 'none'}
     >
       <TouchableOpacity
         activeOpacity={0.9}
-        onPress={() => {
-          if (navigationRef.isReady()) {
-            (navigationRef as any).navigate('FileTransfer', { role, deviceName });
-          }
-        }}
-        style={[styles.content, { backgroundColor: colors.surface, ...layout.shadow.medium }]}
+        onPress={handlePress}
+        style={[
+          styles.card,
+          {
+            backgroundColor: isDark ? colors.surface : '#FFFFFF',
+            borderColor: isDark ? colors.border : '#F0F0F0',
+            ...layout.shadow.medium,
+          },
+        ]}
       >
-        {/* Progress bar at bottom */}
-        <LinearGradient
-          colors={colors.gradient}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 0 }}
-          style={styles.progressBg}
-        >
-          <View
-            style={[
-              styles.progressFill,
-              { width: `${100 - progressPct}%`, backgroundColor: colors.surface },
-            ]}
-          />
-        </LinearGradient>
-
-        <View style={styles.innerContent}>
-          <View style={[styles.iconBox, { backgroundColor: colors.primary + '20' }]}>
-            <Icon
-              name={role === 'sender' ? 'arrow-up-circle' : 'arrow-down-circle'}
-              size={22}
-              color={colors.primary}
+        <View style={styles.content}>
+          <View style={[styles.iconContainer, { backgroundColor: accentColor + '20' }]}>
+            <Icon 
+              name={isSending ? "upload" : "download"}
+              size={24}
+              color={accentColor} 
             />
           </View>
 
           <View style={styles.textContainer}>
-            <Text style={[styles.title, { color: colors.text }]} numberOfLines={1}>
-              {role === 'sender' ? 'Sending to' : 'Receiving from'}{' '}
-              <Text style={{ color: colors.primary }}>{deviceName || 'Device'}</Text>
+            <Text style={[styles.title, { color: colors.text, fontFamily: typography.fontFamily }]}>
+              {isSending ? 'Sending to' : 'Receiving from'} {deviceName || 'Device'}
             </Text>
-            <Text style={[styles.subtitle, { color: colors.subtext }]} numberOfLines={1}>
-              {progressPct}%
-              {transferStats?.transferSpeed ? ` • ${transferStats.transferSpeed}` : ''}
-              {transferStats?.eta && transferStats.eta !== '--:--'
-                ? ` • ETA: ${transferStats.eta}`
-                : ''}
-            </Text>
+
+            <View style={styles.statsRow}>
+              <Text style={[styles.statsText, { color: colors.subtext, fontFamily: typography.fontFamily }]}>
+                {Math.round(transferStats.overallProgress * 100)}%
+              </Text>
+              <Text style={styles.dot}>•</Text>
+              <Text style={[styles.statsText, { color: colors.subtext, fontFamily: typography.fontFamily }]}>
+                {transferStats.transferSpeed}
+              </Text>
+            </View>
+
+            <View style={[styles.progressBackground, { backgroundColor: isDark ? '#333' : '#E0E0E0' }]}>
+              <View
+                style={[
+                  styles.progressFill,
+                  {
+                    backgroundColor: accentColor,
+                    width: `${Math.min(100, Math.max(0, (transferStats.overallProgress || 0) * 100))}%`
+                  }
+                ]}
+              />
+            </View>
           </View>
 
-          <Icon name="chevron-right" size={24} color={colors.subtext} />
+          <TouchableOpacity style={styles.openButton} onPress={handlePress}>
+            <Text style={[styles.openButtonText, { color: accentColor }]}>View</Text>
+            <Icon name="chevron-right" size={20} color={accentColor} />
+          </TouchableOpacity>
         </View>
       </TouchableOpacity>
     </Animated.View>
@@ -163,54 +137,72 @@ const GlobalTransferOverlay = () => {
 const styles = StyleSheet.create({
   container: {
     position: 'absolute',
-    top: 0,
-    left: 20,
-    right: 20,
-    zIndex: 9999,
-    elevation: 10,
-  },
-  content: {
-    borderRadius: 20,
-    overflow: 'hidden',
-    height: 70,
-  },
-  progressBg: {
-    position: 'absolute',
     bottom: 0,
     left: 0,
     right: 0,
-    height: 4,
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
+    paddingHorizontal: 16,
+    zIndex: 9999, // Ensure it's on top
   },
-  progressFill: {
-    height: '100%',
+  card: {
+    borderRadius: 20,
+    borderWidth: 1,
+    overflow: 'hidden',
   },
-  innerContent: {
-    flex: 1,
+  content: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 16,
-    gap: 12,
+    padding: 16,
   },
-  iconBox: {
-    width: 42,
-    height: 42,
-    borderRadius: 12,
+  iconContainer: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     alignItems: 'center',
     justifyContent: 'center',
+    marginRight: 12,
   },
   textContainer: {
     flex: 1,
+    justifyContent: 'center',
   },
   title: {
+    fontSize: 15,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  statsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  statsText: {
+    fontSize: 12,
+  },
+  dot: {
+    color: '#9CA3AF',
+    marginHorizontal: 6,
+    fontSize: 12,
+  },
+  progressBackground: {
+    marginTop: 2,
+    width: '100%',
+    height: 4,
+    borderRadius: 2,
+    overflow: 'hidden',
+  },
+  progressFill: {
+    height: '100%',
+    borderRadius: 2,
+  },
+  openButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingLeft: 12,
+  },
+  openButtonText: {
     fontSize: 14,
     fontWeight: '700',
-  },
-  subtitle: {
-    fontSize: 12,
-    marginTop: 2,
-  },
+  }
 });
 
 export default GlobalTransferOverlay;

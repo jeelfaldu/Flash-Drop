@@ -1,7 +1,8 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { NavigationContainer, createNavigationContainerRef } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { BackHandler, PermissionsAndroid, Platform, View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import HomeScreen from './src/screens/HomeScreen';
 import SendScreen from './src/screens/SendScreen';
@@ -10,10 +11,11 @@ import HistoryScreen from './src/screens/HistoryScreen';
 import SharingScreen from './src/screens/SharingScreen';
 import FileTransferScreen from './src/screens/FileTransferScreen';
 import PCConnectionScreen from './src/screens/PCConnectionScreen';
+import OnboardingScreen from './src/screens/OnboardingScreen';
 import { requestConnectPermissions } from './src/utils/permissionHelper';
 import { ThemeProvider, useTheme } from './src/theme/ThemeContext';
-import GlobalTransferOverlay from './src/components/GlobalTransferOverlay';
 import { ToastProvider } from './src/components/Toast';
+import { GlobalTransferOverlay } from './src/components/GlobalTransferOverlay';
 
 export const navigationRef = createNavigationContainerRef();
 
@@ -66,10 +68,20 @@ const Stack = createNativeStackNavigator();
 
 const AppNavigator = () => {
   const { colors, isDark } = useTheme();
+  const [initialRoute, setInitialRoute] = useState<string | null>(null);
+
+  useEffect(() => {
+    AsyncStorage.getItem('hasSeenOnboarding').then((val) => {
+      setInitialRoute(val === 'true' ? 'Home' : 'Onboarding');
+    });
+  }, []);
+
+  if (!initialRoute) return null; // Wait for AsyncStorage check
 
   return (
     <NavigationContainer ref={navigationRef}>
       <Stack.Navigator
+        initialRouteName={initialRoute}
         screenOptions={{
           headerStyle: { backgroundColor: colors.background },
           headerTintColor: colors.text,
@@ -80,6 +92,7 @@ const AppNavigator = () => {
           animation: 'slide_from_right',
         }}
       >
+        <Stack.Screen name="Onboarding" component={OnboardingScreen} options={{ animation: 'fade' }} />
         <Stack.Screen name="Home" component={HomeScreen} />
         <Stack.Screen name="Send" component={SendScreen} />
         <Stack.Screen name="Receive" component={ReceiveScreen} />
@@ -88,7 +101,6 @@ const AppNavigator = () => {
         <Stack.Screen name="FileTransfer" component={FileTransferScreen} />
         <Stack.Screen name="PCConnection" component={PCConnectionScreen} />
       </Stack.Navigator>
-      <GlobalTransferOverlay />
     </NavigationContainer>
   );
 };
@@ -102,7 +114,10 @@ const App = () => {
     <ErrorBoundary>
       <ThemeProvider>
         <ToastProvider>
-          <AppNavigator />
+          <View style={{ flex: 1 }}>
+            <AppNavigator />
+            <GlobalTransferOverlay />
+          </View>
         </ToastProvider>
       </ThemeProvider>
     </ErrorBoundary>

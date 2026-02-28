@@ -6,7 +6,7 @@ import { saveHistoryItem } from './HistoryService';
 import DiscoveryManager from './DiscoveryManager';
 
 export type ServerStatus = {
-  type: 'client_connected' | 'progress' | 'complete' | 'error';
+  type: 'client_connected' | 'progress' | 'upload_progress' | 'complete' | 'error';
   clientAddress?: string;
   fileProgress?: {
     name: string;
@@ -27,7 +27,11 @@ export class TransferServer {
   start(port = 8888, files: any[], onStatus?: (status: ServerStatus) => void) {
     this.currentPort = port;
     this.filesToSend = files;
-    this.statusCallback = onStatus;
+    // Only overwrite callback if caller explicitly provides one.
+    // startServer() from PCConnectionScreen passes no callback — preserve existing subscription.
+    if (onStatus !== undefined) {
+      this.statusCallback = onStatus;
+    }
 
     if (this.server) {
       console.log(`[TransferServer] Server already running on 0.0.0.0:${port}, updating handlers.`);
@@ -42,13 +46,67 @@ export class TransferServer {
           console.log('[TransferServer] Client connected from:', clientIp);
 
           // Upload state for this connection
-          let uploadState = {
+          // NOTE: lastProgressTime added for time-based throttling
+          let uploadState: {
+            receiving: boolean;
+            fileName: string;
+            fileSize: number;
+            receivedBytes: number;
+            filePath: string;
+            writePromise: Promise<void>;
+            lastProgressTime: number;
+          } = {
             receiving: false,
             fileName: '',
             fileSize: 0,
             receivedBytes: 0,
             filePath: '',
-            writePromise: Promise.resolve()
+            writePromise: Promise.resolve(),
+            lastProgressTime: 0,
+          };
+
+          // ─────────────────────────────────────────────────────────────────────
+          // appendBufferSafe:
+          //   Split large received buffer into 256 KB slices.
+          //   ⚑ KEY FIX: base64 encoding is INSIDE the .then() so it runs
+          //     one chunk per event-loop tick — not 200 synchronous calls at once.
+          //     This prevents JS-thread stalls for large files (50+ MB).
+          // ─────────────────────────────────────────────────────────────────────
+          const appendBufferSafe = (buf: Buffer, filePath: string, currentPromise: Promise<void>): Promise<void> => {
+            const SUB_CHUNK = 256 * 1024;
+            let promise = currentPromise;
+            let chunkIdx = 0;
+            for (let off = 0; off < buf.length; off += SUB_CHUNK) {
+              const start = off;
+              const end = Math.min(off + SUB_CHUNK, buf.length);
+              const yieldTick = (chunkIdx % 8 === 7); // yield to event loop every 8 chunks (~2 MB)
+              chunkIdx++;
+              promise = promise.then(() => {
+                // Encoding deferred — runs one chunk at a time as promises resolve
+                const slice = buf.slice(start, end);
+                const b64 = slice.toString('base64');
+                const write = RNFS.appendFile(filePath, b64, 'base64');
+                if (yieldTick) {
+                  // Yield to event loop so UI animations & touches remain responsive
+                  return write.then(() => new Promise<void>(res => setTimeout(res, 0)));
+                }
+                return write;
+              });
+            }
+            return promise;
+          };
+
+          // Helper: throttled progress update (max once every 500 ms)
+          const reportProgress = (name: string, received: number, total: number, force = false) => {
+            if (!this.statusCallback) return;
+            const now = Date.now();
+            if (!force && now - uploadState.lastProgressTime < 500) return;
+            uploadState.lastProgressTime = now;
+            const percent = total > 0 ? Math.min(Math.round((received / total) * 100), 99) : 0;
+            this.statusCallback({
+              type: 'upload_progress',
+              fileProgress: { name, percent, sent: received, total },
+            });
           };
 
           if (this.statusCallback && !this.connectedClients.has(clientIp)) {
@@ -58,52 +116,48 @@ export class TransferServer {
               clientAddress: clientIp
             });
           }
-            
-            socket.on('data', async (data) => {
-              // If we are already receiving a file, treat data as file content
+
+          socket.on('data', async (data) => {
               if (uploadState.receiving) {
                 uploadState.receivedBytes += data.length;
-                const chunkBase64 = data.toString('base64');
 
-                  // Chain writes to ensure order
-                  uploadState.writePromise = uploadState.writePromise.then(() =>
-                    RNFS.appendFile(uploadState.filePath, chunkBase64, 'base64')
-                  );
+                // ── Safe write: split into 256KB sub-chunks to avoid JS thread blocking ──
+                uploadState.writePromise = appendBufferSafe(Buffer.from(data), uploadState.filePath, uploadState.writePromise);
 
-                  if (uploadState.receivedBytes >= uploadState.fileSize) {
-                    uploadState.receiving = false;
-                    await uploadState.writePromise;
-                    console.log(`[TransferServer] File received: ${uploadState.fileName}`);
+                // ── Time-based progress (max every 500ms) ──
+                reportProgress(uploadState.fileName, uploadState.receivedBytes, uploadState.fileSize);
 
-                    // Notify status
-                    if (this.statusCallback) {
-                      this.statusCallback({
-                        type: 'complete',
-                        message: `Received ${uploadState.fileName}`
-                      });
-                    }
+                if (uploadState.receivedBytes >= uploadState.fileSize) {
+                  uploadState.receiving = false;
+                  await uploadState.writePromise;
+                  console.log(`[TransferServer] ✅ File received: ${uploadState.fileName}`);
 
-                  // Add to available files list so it shows up in "Send to Phone" (optional, but good verification)
-                  // Actually, this file is ON the phone now.
-                  // We might want to show it in the UI list if we want to confirm receipt? 
-                  // For now let's just respond success.
+                  // Force final 100% progress
+                  if (this.statusCallback) {
+                    this.statusCallback({
+                      type: 'upload_progress',
+                      fileProgress: { name: uploadState.fileName, percent: 100, sent: uploadState.fileSize, total: uploadState.fileSize },
+                    });
+                  }
 
-                  const res = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
-                  socket.write(res, 'utf8', () => {
-                    socket.end(); // Must close when Connection: close is specified
-                  });
+                  if (this.statusCallback) {
+                    this.statusCallback({ type: 'complete', message: `Received ${uploadState.fileName}` });
+                  }
 
-                  // Save history
+                  const res = 'HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\nContent-Length: 0\r\n\r\n';
+                  socket.write(res, 'utf8', () => socket.end());
+
                   saveHistoryItem({
                     fileName: uploadState.fileName,
                     fileSize: uploadState.fileSize,
                     type: 'unknown',
                     role: 'received',
-                    status: 'success'
+                    status: 'success',
                   });
                 }
                 return;
               }
+
 
               const msg = data.toString(); // Peek at data as string
 
@@ -151,18 +205,20 @@ export class TransferServer {
                   console.log(`[TransferServer] ${isResume ? '\u23e9 Resuming' : 'Receiving'} upload: ${fileName} (${fileSize} bytes, offset: ${uploadOffset})`);
 
                   // Initialize upload state
-                  // On resume: start receivedBytes from uploaded offset, APPEND to file
-                  // On fresh:  clear file first
                   uploadState = {
                     receiving: true,
                     fileName: fileName,
                     fileSize: fileSize,
                     receivedBytes: uploadOffset,
                     filePath: destPath,
+                    lastProgressTime: 0,
                     writePromise: isResume
-                      ? Promise.resolve()          // file already has data up to offset
-                      : RNFS.writeFile(destPath, '', 'utf8') // fresh: clear/create
+                      ? Promise.resolve()
+                      : RNFS.writeFile(destPath, '', 'utf8')
                   };
+
+                  // Fire immediate 0% progress so UI shows instantly
+                  reportProgress(fileName, uploadOffset, fileSize, true);
 
                   // Find body start
                   const bodyStartIndex = msg.indexOf('\r\n\r\n');
@@ -172,25 +228,31 @@ export class TransferServer {
 
                     if (bodyBuffer.length > 0) {
                       uploadState.receivedBytes += bodyBuffer.length;
-                      const chunkBase64 = bodyBuffer.toString('base64');
-                      uploadState.writePromise = uploadState.writePromise.then(() =>
-                        RNFS.appendFile(uploadState.filePath, chunkBase64, 'base64')
-                      );
+                      // ── Safe sub-chunk write for initial body ──
+                      uploadState.writePromise = appendBufferSafe(Buffer.from(bodyBuffer), uploadState.filePath, uploadState.writePromise);
+                      reportProgress(uploadState.fileName, uploadState.receivedBytes, uploadState.fileSize);
                     }
 
                     // Check if completed in one chunk
                     if (uploadState.receivedBytes >= uploadState.fileSize) {
                       uploadState.receiving = false;
                       await uploadState.writePromise;
-                      console.log(`[TransferServer] \u2705 File received (single chunk): ${uploadState.fileName}`);
-                      const res = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+                      console.log(`[TransferServer] ✅ File received (single chunk): ${uploadState.fileName}`);
+                      if (this.statusCallback) {
+                        this.statusCallback({
+                          type: 'upload_progress',
+                          fileProgress: { name: uploadState.fileName, percent: 100, sent: uploadState.fileSize, total: uploadState.fileSize },
+                        });
+                        this.statusCallback({ type: 'complete', message: `Received ${uploadState.fileName}` });
+                      }
+                      const res = 'HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\nContent-Length: 0\r\n\r\n';
                       socket.write(res, 'utf8', () => socket.end());
                       saveHistoryItem({
                         fileName: uploadState.fileName,
                         fileSize: uploadState.fileSize,
                         type: 'unknown',
                         role: 'received',
-                        status: 'success'
+                        status: 'success',
                       });
                     }
                   }

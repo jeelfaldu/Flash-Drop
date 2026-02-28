@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -11,7 +11,8 @@ import {
   ActivityIndicator,
   StatusBar,
   SafeAreaView,
-  Modal
+  Modal,
+  Animated,
 } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
 import LinearGradient from 'react-native-linear-gradient';
@@ -47,10 +48,34 @@ const SendScreen = ({ navigation, route }: any) => {
   const [fileCategory, setFileCategory] = useState<'audio' | 'docs' | 'apps' | 'browser'>('browser');
   const [previewItem, setPreviewItem] = useState<any>(null);
 
+  // Footer slide-up animation
+  const footerSlideAnim = useRef(new Animated.Value(100)).current;
+  const wasEmpty = useRef(true);
+
   // On mount: permissions + media load handled entirely by the store
   useEffect(() => {
     checkPermissionsAndLoad();
   }, []);
+
+  // Spring up footer when first item is selected, slide down when cleared
+  useEffect(() => {
+    if (selectedItems.length > 0 && wasEmpty.current) {
+      wasEmpty.current = false;
+      Animated.spring(footerSlideAnim, {
+        toValue: 0,
+        friction: 7,
+        tension: 60,
+        useNativeDriver: true,
+      }).start();
+    } else if (selectedItems.length === 0) {
+      wasEmpty.current = true;
+      Animated.timing(footerSlideAnim, {
+        toValue: 100,
+        duration: 220,
+        useNativeDriver: true,
+      }).start();
+    }
+  }, [selectedItems.length]);
 
   // pickDocument: store handles fetching, we just toggle the picked docs into selection
   const pickDocument = useCallback(async () => {
@@ -174,7 +199,11 @@ const SendScreen = ({ navigation, route }: any) => {
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
-      <StatusBar barStyle="light-content" />
+      <StatusBar
+        barStyle={isDark ? 'light-content' : 'dark-content'}
+        translucent
+        backgroundColor="transparent"
+      />
 
       {/* Header */}
       <View style={styles.headerWrapper}>
@@ -216,8 +245,11 @@ const SendScreen = ({ navigation, route }: any) => {
 
       {isLoading ? (
         <View style={styles.centerContainer}>
-          <ActivityIndicator size="large" color={colors.primary} />
-          <Text style={{ marginTop: 10, color: colors.subtext }}>Loading Media...</Text>
+          <View style={[styles.loadingIconBox, { backgroundColor: colors.primary + '15' }]}>
+            <ActivityIndicator size="large" color={colors.primary} />
+          </View>
+          <Text style={[styles.loadingTitle, { color: colors.text, fontFamily: typography.fontFamily }]}>Loading Media...</Text>
+          <Text style={[styles.loadingSubtitle, { color: colors.subtext, fontFamily: typography.fontFamily }]}>Scanning your files, just a moment</Text>
         </View>
       ) : (
         <View style={styles.content}>
@@ -225,24 +257,44 @@ const SendScreen = ({ navigation, route }: any) => {
         </View>
       )}
 
-      {selectedItems.length > 0 && (
-        <View style={[styles.footer, { backgroundColor: colors.surface, borderTopColor: colors.border }]}>
-          <View style={styles.selectedInfo}>
-            <Text style={[styles.selectedCount, { color: colors.text, fontFamily: typography.fontFamily }]}>
-              {selectedItems.length} Selected
-            </Text>
-            <Text style={[styles.selectedSize, { color: colors.subtext, fontFamily: typography.fontFamily }]}>
-              {formatSize(selectedItems.reduce((acc, i) => acc + i.size, 0))}
-            </Text>
-          </View>
-          <TouchableOpacity onPress={handleSend}>
-            <LinearGradient colors={colors.gradient} style={styles.sendBtn} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}>
-              <Text style={[styles.sendBtnText, { fontFamily: typography.fontFamily }]}>Send</Text>
-              <Icon name="send" size={20} color="#FFF" />
-            </LinearGradient>
-          </TouchableOpacity>
+      <Animated.View
+        style={[
+          styles.footer,
+          {
+            backgroundColor: colors.surface,
+            borderTopColor: colors.border,
+            opacity: selectedItems.length > 0 ? 1 : 0.5,
+            transform: [{ translateY: footerSlideAnim }],
+          }
+        ]}
+        pointerEvents={selectedItems.length === 0 ? 'none' : 'auto'}
+      >
+        <View style={styles.selectedInfo}>
+          <Text style={[styles.selectedCount, { color: colors.text, fontFamily: typography.fontFamily }]}>
+            {selectedItems.length > 0 ? `${selectedItems.length} Selected` : 'No files selected'}
+          </Text>
+          <Text style={[styles.selectedSize, { color: colors.subtext, fontFamily: typography.fontFamily }]}>
+            {selectedItems.length > 0
+              ? formatSize(selectedItems.reduce((acc, i) => acc + i.size, 0))
+              : 'Tap files above to select'}
+          </Text>
         </View>
-      )}
+        <TouchableOpacity
+          onPress={handleSend}
+          disabled={selectedItems.length === 0}
+          activeOpacity={0.8}
+        >
+          <LinearGradient
+            colors={selectedItems.length > 0 ? colors.gradient : ['#9E9E9E', '#757575']}
+            style={styles.sendBtn}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 0 }}
+          >
+            <Text style={[styles.sendBtnText, { fontFamily: typography.fontFamily }]}>Send</Text>
+            <Icon name="send" size={20} color="#FFF" />
+          </LinearGradient>
+        </TouchableOpacity>
+      </Animated.View>
 
       {/* Media Preview Modal */}
       <Modal
@@ -455,6 +507,24 @@ const styles = StyleSheet.create({
     marginTop: 12,
     fontSize: 16,
     fontWeight: '500',
+  },
+  loadingIconBox: {
+    width: 80,
+    height: 80,
+    borderRadius: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 16,
+  },
+  loadingTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    marginBottom: 6,
+  },
+  loadingSubtitle: {
+    fontSize: 13,
+    textAlign: 'center',
+    opacity: 0.7,
   },
   listItem: { flexDirection: 'row', alignItems: 'center', padding: 8, marginBottom: 8, borderRadius: 16, borderBottomWidth: 1 },
   listIconBox: { width: 48, height: 48, borderRadius: 12, alignItems: 'center', justifyContent: 'center', marginRight: 15 },

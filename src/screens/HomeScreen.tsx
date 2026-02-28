@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Dimensions, StatusBar, Animated, ScrollView, Platform } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, Dimensions, StatusBar, Animated, ScrollView, Platform, Linking } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
 import LinearGradient from 'react-native-linear-gradient';
@@ -85,7 +85,11 @@ const HomeScreen = ({ navigation }: any) => {
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
-      <StatusBar barStyle="light-content" />
+      <StatusBar
+        barStyle={isDark ? 'light-content' : 'dark-content'}
+        translucent
+        backgroundColor="transparent"
+      />
       <View style={styles.headerWrapper}>
         <LinearGradient
           colors={colors.gradient}
@@ -128,22 +132,67 @@ const HomeScreen = ({ navigation }: any) => {
 
       <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
 
-        {/* Connection Pill */}
+        {/* Connection Status Banner */}
         {isConnected ? (
-          <Animated.View style={[styles.statusBanner, { backgroundColor: '#E8F5E9', borderColor: '#C8E6C9', borderWidth: 1, opacity: fadeAnim }]}>
+          <Animated.View style={[
+            styles.statusBanner,
+            {
+              backgroundColor: isDark ? 'rgba(76, 175, 80, 0.1)' : '#F1F8E9',
+              borderColor: isDark ? 'rgba(76, 175, 80, 0.2)' : '#DCEDC8',
+              borderWidth: 1,
+              opacity: fadeAnim
+            }
+          ]}>
             <View style={styles.statusContent}>
-              <Icon name="wifi-check" size={24} color="#2E7D32" />
-              <View style={{ marginLeft: 12, flex: 1 }}>
-                <Text style={styles.statusTitle}>Connected to {ssid}</Text>
-                <Text style={styles.statusSub}>Tap to disconnect</Text>
+              <View style={[styles.statusIconContainer, { backgroundColor: isDark ? 'rgba(76, 175, 80, 0.2)' : '#C8E6C9' }]}>
+                <Icon name="wifi-strength-4" size={20} color={isDark ? '#81C784' : '#2E7D32'} />
               </View>
-              <TouchableOpacity onPress={resetConnection} style={styles.disconnectBtn}>
-                <Icon name="close" size={20} color="#2E7D32" />
+              <View style={{ marginLeft: 12, flex: 1 }}>
+                <Text style={[styles.statusTitle, { color: isDark ? '#A5D6A7' : '#1B5E20', fontFamily: typography.fontFamily }]} numberOfLines={1}>
+                  {ssid || 'Connected'}
+                </Text>
+                <Text style={[styles.statusSub, { color: isDark ? '#81C784' : '#388E3C', fontFamily: typography.fontFamily }]}>
+                  Ready to transfer
+                </Text>
+              </View>
+              <TouchableOpacity onPress={resetConnection} activeOpacity={0.7} style={[styles.disconnectBtn, { backgroundColor: isDark ? 'rgba(244, 67, 54, 0.15)' : '#FFEBEE' }]}>
+                <Text style={[styles.disconnectText, { color: isDark ? '#EF5350' : '#D32F2F', fontFamily: typography.fontFamily }]}>Disconnect</Text>
               </TouchableOpacity>
             </View>
           </Animated.View>
         ) : (
-          null
+          <Animated.View
+            style={[
+              styles.statusBanner,
+              {
+                backgroundColor: isDark ? 'rgba(255, 152, 0, 0.08)' : '#FFF8E1',
+                borderColor: isDark ? 'rgba(255, 152, 0, 0.25)' : '#FFECB3',
+                borderWidth: 1,
+                opacity: fadeAnim,
+              }
+            ]}
+          >
+            <View style={styles.statusContent}>
+              <View style={[styles.statusIconContainer, { backgroundColor: isDark ? 'rgba(255,152,0,0.2)' : '#FFE082' }]}>
+                <Icon name="wifi-off" size={20} color={isDark ? '#FFB74D' : '#E65100'} />
+              </View>
+              <View style={{ marginLeft: 12, flex: 1 }}>
+                <Text style={[styles.statusTitle, { color: isDark ? '#FFCC80' : '#BF360C', fontFamily: typography.fontFamily }]}>
+                  Not Connected
+                </Text>
+                <Text style={[styles.statusSub, { color: isDark ? '#FFA726' : '#E64A19', fontFamily: typography.fontFamily }]}>
+                  Use QR to pair with a device
+                </Text>
+              </View>
+              <TouchableOpacity
+                onPress={() => Linking.openSettings()}
+                activeOpacity={0.7}
+                style={[styles.disconnectBtn, { backgroundColor: isDark ? 'rgba(255,152,0,0.15)' : '#FFE0B2' }]}
+              >
+                <Text style={[styles.disconnectText, { color: isDark ? '#FFB74D' : '#E65100', fontFamily: typography.fontFamily }]}>WiFi</Text>
+              </TouchableOpacity>
+            </View>
+          </Animated.View>
         )}
 
         {/* Main Grid */}
@@ -275,25 +324,41 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24
   },
   statusBanner: {
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 32,
+    borderRadius: 20,
+    padding: 16,
+    marginVertical: 12,
+    marginBottom: 0,
   },
   statusContent: {
     flexDirection: 'row',
-    alignItems: 'center'
+    alignItems: 'center',
+    justifyContent: 'space-between'
+  },
+  statusIconContainer: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   statusTitle: {
-    fontSize: 14,
+    fontSize: 15,
     fontWeight: '700',
-    color: '#1B5E20'
+    marginBottom: 2,
   },
   statusSub: {
-    fontSize: 12,
-    color: '#388E3C'
+    fontSize: 13,
+    fontWeight: '500',
   },
   disconnectBtn: {
-    padding: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 20,
+    marginLeft: 12,
+  },
+  disconnectText: {
+    fontSize: 13,
+    fontWeight: '700',
   },
   avatar: {
     width: 48,

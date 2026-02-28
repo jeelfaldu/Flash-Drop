@@ -79,59 +79,43 @@ const FileTransferScreen = () => {
   const deviceName = params.deviceName || currentPeer;
   const initialFiles = params.initialFiles;
 
+  const handleBack = () => {
+    const isCurrentlyTransferring = useTransferStore.getState().isTransferring;
+    if (isCurrentlyTransferring) {
+      // Auto-run in background: just navigate back without asking
+      if (navigation.canGoBack()) navigation.goBack();
+      else (navigation as any).navigate('Home');
+      return true;
+    }
+
+    // If not transferring but connected/in session
+    Alert.alert(
+      "Transfer Complete",
+      "Return to Home screen?",
+      [
+        { text: "Cancel", style: "cancel", onPress: () => { } },
+        {
+          text: "Exit",
+          style: "destructive",
+          onPress: () => {
+            if (role === 'sender') TransferServer.stop();
+            else TransferClient.stop();
+            resetTransfer();
+            setTransferring(false); // Ensure state is reset
+            (navigation as any).navigate('Home');
+          }
+        }
+      ]
+    );
+    return true;
+  };
+
   // Update Zustand store with role
   useEffect(() => {
     setTransferRole(role, deviceName);
     setTransferring(true);
 
-    const onBackPress = () => {
-      const isCurrentlyTransferring = useTransferStore.getState().isTransferring;
-      if (isCurrentlyTransferring) {
-        Alert.alert(
-          "Active Transfer",
-          "A transfer is in progress. Do you want to stop it and leave?",
-          [
-            { text: "Cancel", style: "cancel", onPress: () => { } },
-            {
-              text: "Stop & Leave",
-              style: "destructive",
-              onPress: () => {
-                if (role === 'sender') TransferServer.stop();
-                else TransferClient.stop();
-                resetTransfer();
-                setTransferring(false);
-                if (navigation.canGoBack()) navigation.goBack();
-                else (navigation as any).navigate('Home');
-              }
-            }
-          ]
-        );
-        return true; // Prevent default behavior
-      }
-
-      // If not transferring but connected/in session
-      Alert.alert(
-        "Exit Session",
-        "Do you want to disconnect and return to Home?",
-        [
-          { text: "Cancel", style: "cancel", onPress: () => { } },
-          {
-            text: "Exit",
-            style: "destructive",
-            onPress: () => {
-              if (role === 'sender') TransferServer.stop();
-              else TransferClient.stop();
-              resetTransfer();
-              setTransferring(false); // Ensure state is reset
-              (navigation as any).navigate('Home');
-            }
-          }
-        ]
-      );
-      return true;
-    };
-
-    const backHandler = BackHandler.addEventListener('hardwareBackPress', onBackPress);
+    const backHandler = BackHandler.addEventListener('hardwareBackPress', handleBack);
 
     return () => {
       // Avoid calling setTransferring(false) here, it breaks navigation flow when pushing a new screen
@@ -222,11 +206,9 @@ const FileTransferScreen = () => {
     }
 
     return () => {
-      if (role === 'sender') {
-        TransferServer.statusCallback = undefined;
-      } else {
-        TransferClient.onStatus = undefined;
-      }
+      // Deliberately NOT clearing statusCallback/onStatus here
+      // so progress, notifications, and the GlobalTransferOverlay
+      // continue updating even if the user navigates to the Home screen.
     };
   }, [role, deviceName]); // Re-subscribe if role or device name unexpectedly changes
 
@@ -644,7 +626,11 @@ const FileTransferScreen = () => {
   return (
     <>
       <View style={[styles.container, { backgroundColor: colors.background }]}>
-        <StatusBar barStyle="light-content" />
+        <StatusBar
+          barStyle={isDark ? 'light-content' : 'dark-content'}
+          translucent
+          backgroundColor="transparent"
+        />
 
         <View style={styles.headerWrapper}>
           <LinearGradient
@@ -655,7 +641,14 @@ const FileTransferScreen = () => {
           />
           <SafeAreaView>
             <View style={styles.headerContent}>
-              <View style={{ flex: 1 }}>
+              <TouchableOpacity
+                onPress={handleBack}
+                style={styles.iconButton}
+              >
+                <Icon name="arrow-left" size={24} color="#FFF" />
+              </TouchableOpacity>
+
+              <View style={{ flex: 1, marginLeft: 16 }}>
                 <Text style={[styles.headerTitle, { fontFamily: typography.fontFamily }]}>
                   {role === 'sender' ? 'Sending...' : 'Receiving...'}
                 </Text>
@@ -671,6 +664,25 @@ const FileTransferScreen = () => {
 
         <View style={styles.content}>
           <View style={[styles.listCard, { backgroundColor: colors.surface, ...layout.shadow.medium }]}>
+            {/* ── Completed summary banner ── */}
+            {(() => {
+              const all = Object.values(files) as FileItem[];
+              const done = all.filter(f => f.status === 'completed');
+              if (done.length === 0) return null;
+              const doneBytes = done.reduce((s, f) => s + f.size, 0);
+              return (
+                <View style={[styles.completedBanner, { backgroundColor: colors.success + '12', borderBottomColor: colors.success + '25' }]}>
+                  <View style={[styles.completedDot, { backgroundColor: colors.success }]} />
+                  <Text style={[styles.completedBannerText, { color: colors.success, fontFamily: typography.fontFamily }]}>
+                    {done.length} of {all.length} completed
+                  </Text>
+                  <Text style={[styles.completedBannerSize, { color: colors.success + 'CC', fontFamily: typography.fontFamily }]}>
+                    • {formatSize(doneBytes)}
+                  </Text>
+                  <Icon name="check-circle" size={16} color={colors.success} style={{ marginLeft: 'auto' }} />
+                </View>
+              );
+            })()}
             <FlatList
               data={sortedFiles}
               renderItem={renderItem}
@@ -742,13 +754,16 @@ const FileTransferScreen = () => {
               </TouchableOpacity>
             </View>
 
-            <TouchableOpacity
-              style={[styles.disconnectFullBtn, { borderColor: colors.error }]}
-              onPress={handleDisconnect}
-            >
-              <Icon name="power" size={20} color={colors.error} />
-              <Text style={[styles.disconnectText, { color: colors.error, fontFamily: typography.fontFamily }]}>Disconnect & Exit</Text>
-            </TouchableOpacity>
+            {/* Disconnect & Exit — only shown when NOT actively transferring */}
+            {!Object.values(files).some(f => f.status === 'uploading' || f.status === 'downloading') && (
+              <TouchableOpacity
+                style={[styles.disconnectFullBtn, { borderColor: colors.error }]}
+                onPress={handleDisconnect}
+              >
+                <Icon name="power" size={20} color={colors.error} />
+                <Text style={[styles.disconnectText, { color: colors.error, fontFamily: typography.fontFamily }]}>Disconnect & Exit</Text>
+              </TouchableOpacity>
+            )}
           </View>
         </View>
       </View>
@@ -805,9 +820,17 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 24,
+    paddingHorizontal: 20,
     paddingTop: Platform.OS === 'android' ? 50 : 20,
     paddingBottom: 15,
+  },
+  iconButton: {
+    width: 40,
+    height: 40,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderRadius: 20,
+    backgroundColor: 'rgba(255,255,255,0.15)',
   },
   headerTitle: {
     fontSize: 22,
@@ -972,6 +995,29 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     marginTop: 16,
     gap: 8
+  },
+
+  // Completed summary banner
+  completedBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    gap: 6,
+  },
+  completedDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+  },
+  completedBannerText: {
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  completedBannerSize: {
+    fontSize: 12,
+    fontWeight: '500',
   },
 });
 

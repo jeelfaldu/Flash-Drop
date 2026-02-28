@@ -3,6 +3,7 @@ import { View, Text, FlatList, StyleSheet, StatusBar, TouchableOpacity, SafeArea
 import FastImage from 'react-native-fast-image';
 import LinearGradient from 'react-native-linear-gradient';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
+import RNFS from 'react-native-fs';
 import { useTheme } from '../theme/ThemeContext';
 import { useHistoryStore } from '../store';
 
@@ -44,10 +45,20 @@ const HistoryScreen = ({ navigation }: any) => {
   const getIconColor = (type: string) => {
     const t = type?.toLowerCase() || '';
     if (t.includes('image')) return colors.primary;
-    if (t.includes('video')) return colors.error;
-    if (t.includes('audio')) return colors.secondary;
-    if (t.includes('application') || t.includes('apk')) return '#4CAF50';
-    return colors.subtext;
+    if (t.includes('video')) return '#FF5252';
+    if (t.includes('audio')) return '#00B0FF';
+    if (t.includes('application') || t.includes('apk')) return '#69F0AE';
+    return '#FFB300'; // amber for generic files — matches warm palette
+  };
+
+  const getRelativeDate = (timestamp: number) => {
+    const now = Date.now();
+    const diff = now - timestamp;
+    const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+    if (days === 0) return 'Today';
+    if (days === 1) return 'Yesterday';
+    if (days < 7) return `${days} days ago`;
+    return new Date(timestamp).toLocaleDateString();
   };
 
   const formatSize = (bytes: number) => {
@@ -70,14 +81,16 @@ const HistoryScreen = ({ navigation }: any) => {
       <View style={[
         styles.iconBox,
         {
-          backgroundColor: getIconColor(item.type) + '15'
+          backgroundColor: getIconColor(item.type) + '18'
         }
       ]}>
         {item.type?.toLowerCase().includes('image') && item.role === 'received' && item.fileName ? (
           <FastImage
             style={styles.imagePreview}
             source={{
-              uri: `file://${Platform.OS === 'android' ? '/storage/emulated/0/Download' : ''}/${item.fileName}`,
+              uri: Platform.OS === 'android'
+                ? `file://${RNFS.ExternalDirectoryPath}/FlashDrop/${item.fileName}`
+                : `file://${RNFS.DocumentDirectoryPath}/FlashDrop/${item.fileName}`,
               priority: FastImage.priority.normal,
             }}
             resizeMode={FastImage.resizeMode.cover}
@@ -95,16 +108,29 @@ const HistoryScreen = ({ navigation }: any) => {
           {item.fileName}
         </Text>
         <Text style={[styles.subText, { color: colors.subtext, fontFamily: typography.fontFamily }]}>
-          {formatSize(item.fileSize)} • {new Date(item.timestamp).toLocaleDateString()}
+          {formatSize(item.fileSize)} • {getRelativeDate(item.timestamp)}
         </Text>
       </View>
-      <View style={[styles.statusBadge, { backgroundColor: item.role === 'sent' ? colors.success + '15' : colors.secondary + '15' }]}>
-        <Icon 
+      <View style={[
+        styles.statusBadge,
+        {
+          backgroundColor: item.role === 'sent'
+            ? colors.success + '18'
+            : colors.primary + '18'
+        }
+      ]}>
+        <Icon
           name={item.role === 'sent' ? 'arrow-up' : 'arrow-down'}
           size={12}
-          color={item.role === 'sent' ? colors.success : colors.secondary}
+          color={item.role === 'sent' ? colors.success : colors.primary}
         />
-        <Text style={[styles.statusText, { color: item.role === 'sent' ? colors.success : colors.secondary, textTransform: 'capitalize' }]}>
+        <Text style={[
+          styles.statusText,
+          {
+            color: item.role === 'sent' ? colors.success : colors.primary,
+            textTransform: 'capitalize'
+          }
+        ]}>
           {item.role}
         </Text>
       </View>
@@ -113,7 +139,11 @@ const HistoryScreen = ({ navigation }: any) => {
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
-      <StatusBar barStyle="light-content" />
+      <StatusBar
+        barStyle={isDark ? 'light-content' : 'dark-content'}
+        translucent
+        backgroundColor="transparent"
+      />
 
       <View style={styles.headerWrapper}>
         <LinearGradient

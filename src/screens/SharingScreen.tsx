@@ -26,7 +26,7 @@ import { useConnectionStore, useTransferStore } from '../store';
 
 const SharingScreen = ({ route, navigation }: any) => {
   const { items = [], mode } = route.params || {};
-  const { colors, typography, layout, spacing } = useTheme();
+  const { colors, typography, layout, spacing, isDark } = useTheme();
 
   // Zustand stores
   const {
@@ -140,7 +140,11 @@ const SharingScreen = ({ route, navigation }: any) => {
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
-      <StatusBar barStyle="light-content" />
+      <StatusBar
+        barStyle={isDark ? 'light-content' : 'dark-content'}
+        translucent
+        backgroundColor="transparent"
+      />
 
       <View style={styles.headerWrapper}>
         <LinearGradient

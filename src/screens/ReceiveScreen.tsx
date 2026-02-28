@@ -13,7 +13,8 @@ import {
   Dimensions,
   Animated,
   Easing,
-  BackHandler
+  BackHandler,
+  Linking,
 } from 'react-native';
 import { Camera, useCameraDevice, useCodeScanner } from 'react-native-vision-camera';
 import WifiManager from 'react-native-wifi-reborn';
@@ -41,7 +42,7 @@ interface TransferringFile {
 const ReceiveScreen = ({ route }: any) => {
   const navigation = useNavigation();
   const isConnectMode = route?.params?.mode === 'connect';
-  const { colors, typography, layout, spacing } = useTheme();
+  const { colors, typography, layout, spacing, isDark } = useTheme();
 
   // Zustand stores
   const {
@@ -195,7 +196,11 @@ const ReceiveScreen = ({ route }: any) => {
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
-      <StatusBar barStyle="light-content" />
+      <StatusBar
+        barStyle={isDark ? 'light-content' : 'dark-content'}
+        translucent
+        backgroundColor="transparent"
+      />
 
       {/* Header */}
       <View style={styles.headerWrapper}>
@@ -210,7 +215,8 @@ const ReceiveScreen = ({ route }: any) => {
             <TouchableOpacity
               onPress={() => {
                 TransferClient.stop();
-                navigation.goBack();
+                if (navigation.canGoBack()) navigation.goBack();
+                else (navigation as any).navigate('Home');
               }}
               style={styles.iconButton}
             >
@@ -227,7 +233,7 @@ const ReceiveScreen = ({ route }: any) => {
       <View style={styles.contentContainer}>
         <View style={[styles.mainCard, { backgroundColor: colors.surface, ...layout.shadow.medium }]}>
             <View style={styles.scannerWrapper}>
-              {hasPermission && device ? (
+            {hasPermission && device ? (
                 <View style={[styles.cameraFrame, { borderColor: colors.primary }]}>
                   <Camera
                     style={StyleSheet.absoluteFill}
@@ -249,7 +255,29 @@ const ReceiveScreen = ({ route }: any) => {
                   <View style={styles.cornerBL} />
                   <View style={styles.cornerBR} />
                 </View>
-              ) : <ActivityIndicator size="large" color={colors.primary} />}
+            ) : !hasPermission ? (
+              <View style={styles.permissionDeniedBox}>
+                <View style={[styles.permissionIconBox, { backgroundColor: colors.error + '15' }]}>
+                  <Icon name="camera-off" size={40} color={colors.error} />
+                </View>
+                <Text style={[styles.permissionTitle, { color: colors.text, fontFamily: typography.fontFamily }]}>
+                  Camera Access Required
+                </Text>
+                <Text style={[styles.permissionSub, { color: colors.subtext, fontFamily: typography.fontFamily }]}>
+                  To scan the sender's QR code, FlashDrop needs camera access. Please allow it in Settings.
+                </Text>
+                <TouchableOpacity
+                  style={[styles.permissionBtn, { backgroundColor: colors.primary }]}
+                  onPress={() => Linking.openSettings()}
+                  activeOpacity={0.8}
+                >
+                  <Icon name="cog" size={18} color="#FFF" />
+                  <Text style={[styles.permissionBtnText, { fontFamily: typography.fontFamily }]}>Open Settings</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <ActivityIndicator size="large" color={colors.primary} />
+            )}
               <Text style={[styles.hintText, { color: colors.text, fontFamily: typography.fontFamily }]}>
                 Scan sender's QR code
               </Text>
@@ -387,6 +415,44 @@ const styles = StyleSheet.create({
     marginTop: 24,
     fontSize: 16,
     fontWeight: '600'
+  },
+  permissionDeniedBox: {
+    alignItems: 'center',
+    paddingHorizontal: 24,
+    gap: 12,
+  },
+  permissionIconBox: {
+    width: 80,
+    height: 80,
+    borderRadius: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 8,
+  },
+  permissionTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  permissionSub: {
+    fontSize: 13,
+    textAlign: 'center',
+    lineHeight: 20,
+    opacity: 0.8,
+  },
+  permissionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 30,
+    marginTop: 8,
+  },
+  permissionBtnText: {
+    color: '#FFF',
+    fontSize: 15,
+    fontWeight: '700',
   },
   radarWrapper: {
     flex: 1,
