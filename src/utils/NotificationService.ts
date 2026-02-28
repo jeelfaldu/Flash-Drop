@@ -45,6 +45,7 @@ class NotificationService {
       body: `${Math.round(progress * 100)}% completed`,
       android: {
         channelId,
+        smallIcon: 'ic_notification',
         onlyAlertOnce: true,
         progress: {
           max: 100,
@@ -68,6 +69,7 @@ class NotificationService {
         : `Failed to transfer ${fileName}`,
       android: {
         channelId,
+        smallIcon: 'ic_notification',
       },
     });
   }
