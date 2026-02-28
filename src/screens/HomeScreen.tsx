@@ -271,6 +271,13 @@ const HomeScreen = ({ navigation }: any) => {
             </TouchableOpacity>
           </View>
 
+          {/* Made with love in Bharat */}
+          <View style={{ alignItems: 'center', marginTop: 32, marginBottom: 10 }}>
+            <Text style={{ fontSize: 13, color: colors.subtext, fontFamily: typography.fontFamily, fontWeight: '500', opacity: 0.8 }}>
+              Made with ❤️ in Bharat
+            </Text>
+          </View>
+
         </Animated.View>
 
       </ScrollView>

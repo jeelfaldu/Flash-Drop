@@ -88,7 +88,9 @@ const AppNavigator = () => {
     });
   }, []);
 
-  if (!initialRoute) return null; // Wait for AsyncStorage check
+  if (!initialRoute) {
+    return <View style={{ flex: 1, backgroundColor: colors.background }} />;
+  }
 
   return (
     <NavigationContainer ref={navigationRef}>
