@@ -2,6 +2,30 @@ import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
+// Transfer State Interfaces
+export interface FileItem {
+  id: string;
+  name: string;
+  size: number;
+  uri: string;
+  type: string;
+  status?: 'pending' | 'uploading' | 'downloading' | 'completed' | 'error';
+  progress?: number;
+  [key: string]: any; // Allow other properties for flexibility
+}
+
+export interface TransferStats {
+  totalSize: number;
+  transferredSize: number;
+  leftData: string;
+  freeSpace: string;
+  overallProgress: number;
+  transferSpeed: string;
+  eta: string;
+  lastUpdateTime: number;
+  lastTransferredSize: number;
+}
+
 // Transfer State Store
 interface TransferState {
   // Current transfer role
@@ -10,14 +34,21 @@ interface TransferState {
   isTransferring: boolean;
   
   // Selected items for sending
-  selectedItems: any[];
-  setSelectedItems: (items: any[]) => void;
-  toggleItem: (item: any) => void;
+  selectedItems: FileItem[];
+  setSelectedItems: (items: FileItem[]) => void;
+  toggleItem: (item: FileItem) => void;
   clearSelection: () => void;
   
   // Transfer session
   setRole: (role: 'sender' | 'receiver' | null, deviceName?: string) => void;
   setTransferring: (status: boolean) => void;
+
+  // New: Transfer Progress State
+  currentFiles: Record<string, FileItem>;
+  transferStats: TransferStats;
+  setFiles: (files: Record<string, FileItem> | ((prev: Record<string, FileItem>) => Record<string, FileItem>)) => void;
+  setTransferStats: (stats: Partial<TransferStats> | ((prev: TransferStats) => Partial<TransferStats>)) => void;
+
   resetTransfer: () => void;
 }
 
@@ -28,6 +59,18 @@ export const useTransferStore = create<TransferState>()(
       deviceName: '',
       isTransferring: false,
       selectedItems: [],
+      currentFiles: {},
+      transferStats: {
+        totalSize: 0,
+        transferredSize: 0,
+        leftData: '0GB',
+        freeSpace: '0GB',
+        overallProgress: 0,
+        transferSpeed: '0 KB/s',
+        eta: '--:--',
+        lastUpdateTime: Date.now(),
+        lastTransferredSize: 0
+      },
       
       setSelectedItems: (items) => set({ selectedItems: Array.isArray(items) ? items : [] }),
       
@@ -46,17 +89,45 @@ export const useTransferStore = create<TransferState>()(
       setRole: (role, deviceName = '') => set({ role, deviceName }),
       
       setTransferring: (status) => set({ isTransferring: status }),
-      
+
+      setFiles: (filesUpdate) => set((state) => ({
+        currentFiles: typeof filesUpdate === 'function' ? filesUpdate(state.currentFiles) : filesUpdate
+      })),
+
+      setTransferStats: (statsUpdate) => set((state) => {
+        const newStats = typeof statsUpdate === 'function' ? statsUpdate(state.transferStats) : statsUpdate;
+        return { transferStats: { ...state.transferStats, ...newStats } };
+      }),
+
       resetTransfer: () => set({
         role: null,
         deviceName: '',
         isTransferring: false,
-        selectedItems: []
+        selectedItems: [],
+        currentFiles: {},
+        transferStats: {
+          totalSize: 0,
+          transferredSize: 0,
+          leftData: '0GB',
+          freeSpace: '0GB',
+          overallProgress: 0,
+          transferSpeed: '0 KB/s',
+          eta: '--:--',
+          lastUpdateTime: Date.now(),
+          lastTransferredSize: 0
+        }
       }),
     }),
     {
       name: 'transfer-storage',
       storage: createJSONStorage(() => AsyncStorage),
+      // ⚠️ Do NOT persist isTransferring — it should always be false on app start.
+      // Persisting it caused the overlay to appear even with no active connection.
+      partialize: (state) => ({
+        role: state.role,
+        deviceName: state.deviceName,
+        selectedItems: state.selectedItems
+      }),
     }
   )
 );
@@ -107,66 +178,15 @@ export const useConnectionStore = create<ConnectionState>()(
   )
 );
 
-// Media State Store (No persistence - too large for AsyncStorage)
-interface MediaState {
-  photos: any[];
-  videos: any[];
-  documents: any[];
-  audio: any[];
-  contacts: any[];
-  apps: any[];
-  
-  isLoading: boolean;
-  error: string | null;
-  
-  setPhotos: (photos: any[]) => void;
-  setVideos: (videos: any[]) => void;
-  setDocuments: (documents: any[]) => void;
-  setAudio: (audio: any[]) => void;
-  setContacts: (contacts: any[]) => void;
-  setApps: (apps: any[]) => void;
-  
-  addDocuments: (newDocs: any[]) => void;
-  setLoading: (loading: boolean) => void;
-  setError: (error: string | null) => void;
-  clearAll: () => void;
-}
+// Media store is in its own file for cleanliness
+export { useMediaStore } from './mediaStore';
 
-export const useMediaStore = create<MediaState>((set) => ({
-  photos: [],
-  videos: [],
-  documents: [],
-  audio: [],
-  contacts: [],
-  apps: [],
-  isLoading: false,
-  error: null,
-  
-  setPhotos: (photos) => set({ photos }),
-  setVideos: (videos) => set({ videos }),
-  setDocuments: (documents) => set({ documents }),
-  setAudio: (audio) => set({ audio }),
-  setContacts: (contacts) => set({ contacts }),
-  setApps: (apps) => set({ apps }),
-  
-  addDocuments: (newDocs) => set((state) => ({
-    documents: [...state.documents, ...newDocs]
-  })),
-  
-  setLoading: (loading) => set({ isLoading: loading }),
-  setError: (error) => set({ error }),
-  
-  clearAll: () => set({
-    photos: [],
-    videos: [],
-    documents: [],
-    audio: [],
-    contacts: [],
-    apps: [],
-    isLoading: false,
-    error: null
-  }),
-}));
+// History store
+export { useHistoryStore } from './historyStore';
+
+// PC Connection store
+export { usePCConnectionStore } from './pcConnectionStore';
+
 
 // UI State Store (persisted for user preferences)
 interface UIState {

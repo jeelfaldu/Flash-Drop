@@ -1,49 +1,91 @@
-import React, { useEffect } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Dimensions, SafeAreaView, StatusBar } from 'react-native';
-import LinearGradient from 'react-native-linear-gradient';
+import React, { useEffect, useRef } from 'react';
+import { View, Text, TouchableOpacity, StyleSheet, Dimensions, StatusBar, Animated, ScrollView, Platform } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
+import LinearGradient from 'react-native-linear-gradient';
 import { useTheme } from '../theme/ThemeContext';
 import { useConnectionStore } from '../store';
-import WifiP2PManager from '../utils/WifiP2PManager';
-import DeviceInfo from 'react-native-device-info';
-import { Platform } from 'react-native';
+import { requestConnectPermissions } from '../utils/permissionHelper';
 
-const { height } = Dimensions.get('window');
+const { width } = Dimensions.get('window');
 
 const HomeScreen = ({ navigation }: any) => {
-  const { colors, isDark, toggleTheme, spacing, typography, layout } = useTheme();
-  const { isConnected, ssid, resetConnection, setConnected, setConnectionDetails } = useConnectionStore();
+  const { colors, isDark, toggleTheme, typography, layout } = useTheme();
+  const { isConnected, ssid, resetConnection } = useConnectionStore();
+
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const slideAnim = useRef(new Animated.Value(30)).current;
+  const boltScale = useRef(new Animated.Value(1)).current;
+  const boltRotate = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
-    const checkExistingConnection = async () => {
-      try {
-        const connInfo: any = await WifiP2PManager.getConnectionInfo();
-        if (connInfo && connInfo.groupFormed) {
-          const ip = await DeviceInfo.getIpAddress();
-          if (ip && ip !== '0.0.0.0' && ip !== '127.0.0.1') {
-            setConnected(true);
-            setConnectionDetails({
-              type: 'wifi-direct',
-              ssid: 'WiFi-Direct Group',
-              ip: ip
-            });
-          }
-        }
-      } catch (e) {
-        console.log('[HomeScreen] Connection check failed:', e);
-      }
-    };
+    requestConnectPermissions().catch(err => console.error(err));
+    Animated.parallel([
+      Animated.timing(fadeAnim, { toValue: 1, duration: 600, useNativeDriver: true }),
+      Animated.spring(slideAnim, { toValue: 0, friction: 8, useNativeDriver: true }),
+    ]).start();
 
-    checkExistingConnection();
+    // ⚡ Looping bolt animation: pulse scale + subtle rock
+    Animated.loop(
+      Animated.sequence([
+        Animated.parallel([
+          Animated.timing(boltScale, { toValue: 1.25, duration: 700, useNativeDriver: true }),
+          Animated.timing(boltRotate, { toValue: 1, duration: 700, useNativeDriver: true }),
+        ]),
+        Animated.parallel([
+          Animated.timing(boltScale, { toValue: 0.95, duration: 500, useNativeDriver: true }),
+          Animated.timing(boltRotate, { toValue: -1, duration: 500, useNativeDriver: true }),
+        ]),
+        Animated.parallel([
+          Animated.timing(boltScale, { toValue: 1, duration: 400, useNativeDriver: true }),
+          Animated.timing(boltRotate, { toValue: 0, duration: 400, useNativeDriver: true }),
+        ]),
+        Animated.delay(1800), // pause between pulses
+      ])
+    ).start();
   }, []);
 
-  console.log('[HomeScreen] Connection Status:', isConnected, 'SSID:', ssid);
+
+  const DashboardCard = ({ title, subtitle, icon, color, onPress, size = 'large' }: any) => {
+    // Width calculation: (Useable Width - Gap) / 2
+    // Useable Width = Window Width - Horizontal Padding (24 * 2) = 48
+    // Gap = 16
+    const cardWidth = size === 'large' ? (width - 48 - 16) / 2 : (width - 48);
+    const height = size === 'large' ? 160 : 80;
+
+    return (
+      <TouchableOpacity
+        activeOpacity={0.9}
+        onPress={onPress}
+        style={[
+          styles.dashboardCard,
+          {
+            width: cardWidth,
+            height: height,
+            backgroundColor: isDark ? colors.surface : colors.surface,
+            borderColor: isDark ? colors.border : '#F0F0F0',
+            borderWidth: 1,
+            ...layout.shadow.medium
+          }
+        ]}
+      >
+        <View style={[styles.cardIconCtx, { backgroundColor: color + '15' }]}>
+          <Icon name={icon} size={size === 'large' ? 32 : 24} color={color} />
+        </View>
+        <View style={styles.cardTextCtx}>
+          <Text style={[styles.cardTitle, { color: colors.text, fontFamily: typography.fontFamily, fontSize: 17 }]}>{title}</Text>
+          <Text style={[styles.cardSubtitle, { color: colors.subtext, fontFamily: typography.fontFamily }]}>{subtitle}</Text>
+        </View>
+
+        {/* Decorative corner */}
+        <View style={[styles.cornerDeco, { backgroundColor: color, opacity: 0.08 }]} />
+      </TouchableOpacity>
+    );
+  };
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
-      <StatusBar barStyle="light-content" translucent backgroundColor="transparent" />
-
-      {/* Header Section */}
+      <StatusBar barStyle="light-content" />
       <View style={styles.headerWrapper}>
         <LinearGradient
           colors={colors.gradient}
@@ -52,87 +94,124 @@ const HomeScreen = ({ navigation }: any) => {
           end={{ x: 1, y: 1 }}
         />
         <SafeAreaView>
-          {isConnected && (
-            <View style={styles.connectionStatusBar}>
-              <Icon name="link-variant" size={16} color="#FFF" style={{ marginRight: 6 }} />
-              <Text style={styles.connectionStatusText}>
-                Connected to {ssid || 'Device'}
-              </Text>
-            </View>
-          )}
           <View style={styles.headerContent}>
-            <View>
-              <Text style={[styles.greeting, { fontFamily: typography.fontFamily, color: '#FFF' }]}>Welcome to</Text>
-              <Text style={[styles.title, { fontFamily: typography.fontFamily, color: '#FFF' }]}>Flash Drop</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+              {/* ⚡ Animated Lightning Bolt */}
+              <Animated.View
+                style={{
+                  transform: [
+                    { scale: boltScale },
+                    {
+                      rotate: boltRotate.interpolate({
+                        inputRange: [-1, 0, 1],
+                        outputRange: ['-12deg', '0deg', '12deg'],
+                      }),
+                    },
+                  ],
+                }}
+              >
+                <View style={styles.boltContainer}>
+                  <Text style={styles.boltEmoji}>⚡</Text>
+                </View>
+              </Animated.View>
+              <View>
+                <Text style={[styles.headerTitle, { fontFamily: typography.fontFamily }]}>FlashDrop</Text>
+                <Text style={[styles.headerSubtitle, { fontFamily: typography.fontFamily }]}>Fastest File Transfer</Text>
+              </View>
             </View>
-            <View style={styles.headerIcons}>
-              {isConnected && (
-                <TouchableOpacity onPress={() => resetConnection()} style={[styles.iconButton, { backgroundColor: 'rgba(255,100,100,0.3)' }]}>
-                  <Icon name="link-off" size={24} color="#FFF" />
-                </TouchableOpacity>
-              )}
-              <TouchableOpacity onPress={toggleTheme} style={styles.iconButton}>
-                <Icon name={isDark ? "weather-sunny" : "weather-night"} size={24} color="#FFF" />
-              </TouchableOpacity>
-              <TouchableOpacity onPress={() => navigation.navigate('History')} style={styles.iconButton}>
-                <Icon name="history" size={24} color="#FFF" />
-              </TouchableOpacity>
-            </View>
+            <TouchableOpacity onPress={toggleTheme} style={styles.iconButton}>
+              <Icon name={isDark ? "weather-sunny" : "weather-night"} size={20} color="#FFF" />
+            </TouchableOpacity>
           </View>
         </SafeAreaView>
       </View>
 
-      {/* Main Content */}
-      <View style={styles.content}>
-        <View style={[styles.card, { backgroundColor: colors.surface, ...layout.shadow.medium }]}>
-          <Text style={[styles.cardTitle, { color: colors.text, fontFamily: typography.fontFamily }]}>File Transfer</Text>
-          <Text style={[styles.cardSubtitle, { color: colors.subtext, fontFamily: typography.fontFamily }]}>
-            Share files, images, videos & documents instantly
-          </Text>
+      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
 
-          <View style={styles.buttonRow}>
-            {/* Send Button */}
-            <TouchableOpacity 
-              style={[styles.actionButton, { backgroundColor: isDark ? colors.border : '#E3F2FD', borderColor: isDark ? colors.border : '#BBDEFB' }]}
+        {/* Connection Pill */}
+        {isConnected ? (
+          <Animated.View style={[styles.statusBanner, { backgroundColor: '#E8F5E9', borderColor: '#C8E6C9', borderWidth: 1, opacity: fadeAnim }]}>
+            <View style={styles.statusContent}>
+              <Icon name="wifi-check" size={24} color="#2E7D32" />
+              <View style={{ marginLeft: 12, flex: 1 }}>
+                <Text style={styles.statusTitle}>Connected to {ssid}</Text>
+                <Text style={styles.statusSub}>Tap to disconnect</Text>
+              </View>
+              <TouchableOpacity onPress={resetConnection} style={styles.disconnectBtn}>
+                <Icon name="close" size={20} color="#2E7D32" />
+              </TouchableOpacity>
+            </View>
+          </Animated.View>
+        ) : (
+          null
+        )}
+
+        {/* Main Grid */}
+        <Animated.View style={[styles.gridContainer, { opacity: fadeAnim, transform: [{ translateY: slideAnim }] }]}>
+          <View style={styles.row}>
+            <DashboardCard
+              title="Send"
+              subtitle="Share Files"
+              icon="upload"
+              color={colors.primary}
               onPress={() => navigation.navigate('Send')}
-              activeOpacity={0.8}
-            >
-              <View style={[styles.iconContainer, { backgroundColor: isDark ? colors.surface : '#FFF' }]}>
-                <Icon name="send" size={28} color={isDark ? colors.primary : "#2196F3"} />
-              </View>
-              <View style={styles.buttonTextContainer}>
-                <Text style={[styles.buttonTitle, { color: colors.text, fontFamily: typography.fontFamily }]}>Send</Text>
-                <Text style={[styles.buttonLabel, { color: colors.subtext, fontFamily: typography.fontFamily }]}>Transfer files</Text>
-              </View>
-            </TouchableOpacity>
-
-            {/* Receive Button */}
-            <TouchableOpacity 
-              style={[styles.actionButton, { backgroundColor: isDark ? colors.border : '#FFF3E0', borderColor: isDark ? colors.border : '#FFE0B2' }]}
+            />
+            <DashboardCard
+              title="Receive"
+              subtitle="Get Files"
+              icon="download"
+              color={colors.secondary}
               onPress={() => navigation.navigate('Receive')}
-              activeOpacity={0.8}
-            >
-              <View style={[styles.iconContainer, { backgroundColor: isDark ? colors.surface : '#FFF' }]}>
-                <Icon name="download" size={28} color={isDark ? colors.secondary : "#FF9800"} />
+            />
+          </View>
+
+          <View style={styles.sectionLabel}>
+            <Text style={[styles.label, { color: colors.subtext, fontFamily: typography.fontFamily }]}>QUICK CONNECT</Text>
+            <View style={[styles.line, { backgroundColor: colors.border }]} />
+          </View>
+
+          <View style={[styles.quickActionCard, { backgroundColor: isDark ? colors.surface : colors.surface, borderColor: isDark ? colors.border : '#F0F0F0', ...layout.shadow.medium }]}>
+            <TouchableOpacity style={styles.quickActionItem} onPress={() => navigation.navigate('Sharing', { items: [], mode: 'pairing' })}>
+              <View style={[styles.quickActionIcon, { backgroundColor: isDark ? '#4A148C' : '#F3E5F5' }]}>
+                <Icon name="qrcode" size={28} color={isDark ? '#CE93D8' : '#9C27B0'} />
               </View>
-              <View style={styles.buttonTextContainer}>
-                <Text style={[styles.buttonTitle, { color: colors.text, fontFamily: typography.fontFamily }]}>Receive</Text>
-                <Text style={[styles.buttonLabel, { color: colors.subtext, fontFamily: typography.fontFamily }]}>Get files</Text>
+              <Text style={[styles.quickActionText, { color: colors.text }]}>Show QR</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity style={styles.quickActionItem} onPress={() => navigation.navigate('Receive', { mode: 'connect' })}>
+              <View style={[styles.quickActionIcon, { backgroundColor: isDark ? '#004D40' : '#E0F2F1' }]}>
+                <Icon name="qrcode-scan" size={28} color={isDark ? '#80CBC4' : '#009688'} />
               </View>
+              <Text style={[styles.quickActionText, { color: colors.text }]}>Scan QR</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity style={styles.quickActionItem} onPress={() => navigation.navigate('PCConnection')}>
+              <View style={[styles.quickActionIcon, { backgroundColor: isDark ? '#0D47A1' : '#E3F2FD' }]}>
+                <Icon name="monitor-share" size={28} color={isDark ? '#90CAF9' : '#1976D2'} />
+              </View>
+              <Text style={[styles.quickActionText, { color: colors.text }]}>PC Share</Text>
             </TouchableOpacity>
           </View>
-        </View>
 
-        {/* Quick Actions / Recent (Placeholder for now) */}
-        <View style={styles.section}>
-          <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: typography.fontFamily }]}>Recent Activity</Text>
-          <View style={[styles.emptyState, { borderColor: colors.border }]}>
-            <Icon name="clock-outline" size={40} color={colors.subtext} />
-            <Text style={[styles.emptyText, { color: colors.subtext, fontFamily: typography.fontFamily }]}>No recent transfers</Text>
+          <View style={styles.listContainer}>
+            <TouchableOpacity
+              style={[styles.listItem, { backgroundColor: isDark ? colors.surface : '#FFF' }]}
+              onPress={() => navigation.navigate('History')}
+            >
+              <View style={[styles.listIcon, { backgroundColor: '#E0E0E0' }]}>
+                <Icon name="history" size={22} color="#616161" />
+              </View>
+              <View style={{ flex: 1, paddingHorizontal: 12 }}>
+                <Text style={[styles.listTitle, { color: colors.text }]}>Transfer History</Text>
+                <Text style={{ fontSize: 12, color: colors.subtext }}>View past activity</Text>
+              </View>
+              <Icon name="chevron-right" size={20} color={colors.subtext} />
+            </TouchableOpacity>
           </View>
-        </View>
 
-      </View>
+        </Animated.View>
+
+      </ScrollView>
     </View>
   );
 };
@@ -142,130 +221,205 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   headerWrapper: {
-    height: height * 0.32,
-    width: '100%',
-    position: 'absolute',
-    top: 0,
+    backgroundColor: 'transparent',
+    zIndex: 10,
+    paddingBottom: 20
   },
   headerGradient: {
     ...StyleSheet.absoluteFillObject,
-    borderBottomLeftRadius: 36,
-    borderBottomRightRadius: 36,
+    borderBottomLeftRadius: 24,
+    borderBottomRightRadius: 24,
   },
   headerContent: {
     flexDirection: 'row',
+    alignItems: 'center',
     justifyContent: 'space-between',
-    alignItems: 'center',
     paddingHorizontal: 24,
-    paddingTop: 40,
+    paddingTop: Platform.OS === 'android' ? 50 : 20,
+    paddingBottom: 15,
   },
-  connectionStatusBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(255,255,255,0.15)',
-    paddingVertical: 6,
-    borderRadius: 12,
-    marginHorizontal: 24,
-    marginTop: 10,
-  },
-  connectionStatusText: {
-    color: '#FFF',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  greeting: {
-    fontSize: 16,
-    opacity: 0.9,
-    fontWeight: '500',
-  },
-  title: {
-    fontSize: 34,
+  headerTitle: {
+    fontSize: 28,
     fontWeight: '800',
-    letterSpacing: 0.5,
+    color: '#FFF',
+    letterSpacing: -0.5
   },
-  headerIcons: {
-    flexDirection: 'row',
-    gap: 12,
+  headerSubtitle: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.7)',
   },
   iconButton: {
+    width: 40,
+    height: 40,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderRadius: 20,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+  },
+  boltContainer: {
     width: 44,
     height: 44,
-    borderRadius: 22,
-    backgroundColor: 'rgba(255,255,255,0.2)',
-    justifyContent: 'center',
+    borderRadius: 14,
+    backgroundColor: 'rgba(255,255,255,0.18)',
     alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.35)',
   },
-  content: {
-    marginTop: height * 0.22,
-    paddingHorizontal: 20,
-    zIndex: 1,
+  boltEmoji: {
+    fontSize: 22,
   },
-  card: {
-    borderRadius: 28,
-    padding: 24,
-    marginBottom: 24,
+  scrollContent: {
+    paddingBottom: 40,
+    paddingHorizontal: 24
+  },
+  statusBanner: {
+    borderRadius: 16,
+    padding: 20,
+    marginBottom: 32,
+  },
+  statusContent: {
+    flexDirection: 'row',
+    alignItems: 'center'
+  },
+  statusTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#1B5E20'
+  },
+  statusSub: {
+    fontSize: 12,
+    color: '#388E3C'
+  },
+  disconnectBtn: {
+    padding: 8,
+  },
+  avatar: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  welcomeText: {
+    fontSize: 18,
+    fontWeight: '700'
+  },
+  gridContainer: {
+    gap: 16,
+    marginTop: 24
+  },
+  row: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  dashboardCard: {
+    borderRadius: 24,
+    padding: 20,
+    justifyContent: 'space-between',
+    position: 'relative',
+    overflow: 'hidden'
+  },
+  cardIconCtx: {
+    width: 56,
+    height: 56,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  cardTextCtx: {
+
   },
   cardTitle: {
-    fontSize: 22,
     fontWeight: '700',
-    marginBottom: 4,
+    marginBottom: 4
   },
   cardSubtitle: {
-    fontSize: 14,
-    marginBottom: 24,
-    lineHeight: 20,
-  },
-  buttonRow: {
-    flexDirection: 'row',
-    gap: 16,
-  },
-  actionButton: {
-    flex: 1,
-    padding: 16,
-    borderRadius: 20,
-    borderWidth: 1,
-  },
-  iconContainer: {
-    width: 52,
-    height: 52,
-    borderRadius: 16,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  buttonTextContainer: {
-    gap: 2,
-  },
-  buttonTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  buttonLabel: {
     fontSize: 12,
   },
-  section: {
-    marginTop: 8,
+  cornerDeco: {
+    position: 'absolute',
+    right: -20,
+    top: -20,
+    width: 80,
+    height: 80,
+    borderRadius: 40
   },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: '700',
-    marginBottom: 16,
-    marginLeft: 4,
+  quickActionCard: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingVertical: 20,
+    paddingHorizontal: 24,
+    borderRadius: 24,
+    borderWidth: 1,
   },
-  emptyState: {
-    borderWidth: 2,
-    borderStyle: 'dashed',
-    borderRadius: 20,
-    height: 120,
-    justifyContent: 'center',
+  quickActionItem: {
     alignItems: 'center',
     gap: 8,
   },
-  emptyText: {
-    fontSize: 14,
+  quickActionIcon: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 4,
+  },
+  quickActionText: {
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  sectionLabel: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 8,
+    marginVertical: 8
+  },
+  label: {
+    fontSize: 12,
+    fontWeight: '700',
+    letterSpacing: 1,
+    marginRight: 12
+  },
+  line: {
+    flex: 1,
+    height: 1
+  },
+  listContainer: {
+    marginTop: 24
+  },
+  listItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 16,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(0,0,0,0.05)'
+  },
+  listIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  listTitle: {
+    fontSize: 15,
+    fontWeight: '600',
+    marginBottom: 2
+  },
+  badge: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    backgroundColor: '#E3F2FD',
+    borderRadius: 6
+  },
+  badgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#1976D2'
   }
 });
 
 export default HomeScreen;
-

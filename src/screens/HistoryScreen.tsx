@@ -1,25 +1,20 @@
-import React, { useEffect, useState } from 'react';
-import { View, Text, FlatList, StyleSheet, StatusBar, TouchableOpacity, SafeAreaView, Platform, Alert } from 'react-native';
+import React, { useEffect } from 'react';
+import { View, Text, FlatList, StyleSheet, StatusBar, TouchableOpacity, SafeAreaView, Platform, Alert, Image } from 'react-native';
+import FastImage from 'react-native-fast-image';
 import LinearGradient from 'react-native-linear-gradient';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
-import { getHistory, clearHistory, HistoryItem } from '../utils/HistoryService';
 import { useTheme } from '../theme/ThemeContext';
+import { useHistoryStore } from '../store';
 
 const HistoryScreen = ({ navigation }: any) => {
   const { colors, typography, spacing, layout, isDark } = useTheme();
-  const [history, setHistory] = useState<HistoryItem[]>([]);
-  const [activeTab, setActiveTab] = useState<'all' | 'sent' | 'received'>('all');
+  const { activeTab, setActiveTab, filteredHistory, loadHistory, clearAll } = useHistoryStore();
 
   useEffect(() => {
     loadHistory();
   }, []);
 
-  const loadHistory = async () => {
-    const data = await getHistory();
-    setHistory(data);
-  };
-
-  const handleClear = async () => {
+  const handleClear = () => {
     Alert.alert(
       "Clear History",
       "Are you sure you want to delete all transfer history?",
@@ -28,19 +23,14 @@ const HistoryScreen = ({ navigation }: any) => {
         {
           text: "Clear All",
           style: "destructive",
-          onPress: async () => {
-            await clearHistory();
-            loadHistory();
-          }
+          onPress: () => clearAll(),
         }
       ]
     );
   };
 
-  const filteredHistory = history.filter(item => {
-    if (activeTab === 'all') return true;
-    return item.role === activeTab;
-  });
+
+
 
   const getIcon = (type: string) => {
     const t = type?.toLowerCase() || '';
@@ -68,7 +58,7 @@ const HistoryScreen = ({ navigation }: any) => {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + s[i];
   };
 
-  const renderItem = ({ item }: { item: HistoryItem }) => (
+  const renderItem = ({ item }: { item: ReturnType<typeof filteredHistory>[number] }) => (
     <View style={[
       styles.card,
       {
@@ -83,11 +73,22 @@ const HistoryScreen = ({ navigation }: any) => {
           backgroundColor: getIconColor(item.type) + '15'
         }
       ]}>
-        <Icon
-          name={getIcon(item.type)}
-          size={24} 
-          color={getIconColor(item.type)}
-        />
+        {item.type?.toLowerCase().includes('image') && item.role === 'received' && item.fileName ? (
+          <FastImage
+            style={styles.imagePreview}
+            source={{
+              uri: `file://${Platform.OS === 'android' ? '/storage/emulated/0/Download' : ''}/${item.fileName}`,
+              priority: FastImage.priority.normal,
+            }}
+            resizeMode={FastImage.resizeMode.cover}
+          />
+        ) : (
+            <Icon
+              name={getIcon(item.type)}
+              size={24}
+              color={getIconColor(item.type)}
+            />
+        )}
       </View>
       <View style={styles.details}>
         <Text style={[styles.fileName, { color: colors.text, fontFamily: typography.fontFamily }]} numberOfLines={1}>
@@ -112,7 +113,7 @@ const HistoryScreen = ({ navigation }: any) => {
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
-      <StatusBar barStyle="light-content" translucent backgroundColor="transparent" />
+      <StatusBar barStyle="light-content" />
 
       <View style={styles.headerWrapper}>
         <LinearGradient
@@ -163,7 +164,7 @@ const HistoryScreen = ({ navigation }: any) => {
 
       <View style={styles.content}>
         <FlatList
-          data={filteredHistory}
+          data={filteredHistory()}
           keyExtractor={item => item.id}
           renderItem={renderItem}
           contentContainerStyle={styles.list}
@@ -270,7 +271,13 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     alignItems: 'center',
     justifyContent: 'center',
-    marginRight: 16
+    marginRight: 16,
+    overflow: 'hidden',
+  },
+  imagePreview: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 14,
   },
   details: { flex: 1 },
   fileName: {

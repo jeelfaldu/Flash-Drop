@@ -1,4 +1,7 @@
 {
   "name": "FlashDrop",
-  "displayName": "FlashDrop"
+  "displayName": "Flash-Drop",
+  "version": "1.0.0",
+  "description": "Lightning fast file sharing for Android/PC",
+  "author": "Flash-Drop Team"
 }

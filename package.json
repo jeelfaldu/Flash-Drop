@@ -1,6 +1,6 @@
 {
-  "name": "FlashDrop",
-  "version": "0.0.1",
+  "name": "flash-drop",
+  "version": "1.0.0",
   "private": true,
   "scripts": {
     "android": "react-native run-android",
@@ -22,6 +22,7 @@
     "react-native": "0.82.1",
     "react-native-contacts": "^8.0.7",
     "react-native-device-info": "^15.0.1",
+    "react-native-fast-image": "^8.6.3",
     "react-native-fs": "^2.20.0",
     "react-native-linear-gradient": "^2.8.3",
     "react-native-permissions": "^5.4.4",
@@ -34,6 +35,7 @@
     "react-native-vision-camera": "^4.7.3",
     "react-native-wifi-p2p": "^3.6.1",
     "react-native-wifi-reborn": "^4.13.6",
+    "react-native-zeroconf": "^0.14.0",
     "zustand": "^5.0.10"
   },
   "devDependencies": {

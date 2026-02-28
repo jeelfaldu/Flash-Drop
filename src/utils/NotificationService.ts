@@ -1,15 +1,44 @@
 import notifee, { AndroidImportance } from '@notifee/react-native';
 
+/**
+ * NotificationService
+ *
+ * Channels are created ONCE (idempotent but still async) and cached,
+ * so we don't re-create them on every progress update (avoids hundreds
+ * of unnecessary async calls during a transfer).
+ */
 class NotificationService {
-  async displayTransferNotification(fileName: string, progress: number, isSending: boolean) {
-    // Create a channel (required for Android)
-    const channelId = await notifee.createChannel({
-      id: 'transfer',
-      name: 'File Transfer',
-      importance: AndroidImportance.DEFAULT,
-    });
+  private transferChannelId: string | null = null;
+  private completeChannelId: string | null = null;
 
-    // Display a notification
+  // ── Lazy channel initialiser — called once per session ──────────────────
+  private async getTransferChannelId(): Promise<string> {
+    if (!this.transferChannelId) {
+      this.transferChannelId = await notifee.createChannel({
+        id: 'transfer',
+        name: 'File Transfer',
+        importance: AndroidImportance.LOW, // LOW = no sound during progress updates
+      });
+    }
+    return this.transferChannelId;
+  }
+
+  private async getCompleteChannelId(): Promise<string> {
+    if (!this.completeChannelId) {
+      this.completeChannelId = await notifee.createChannel({
+        id: 'transfer_complete',
+        name: 'Transfer Complete',
+        importance: AndroidImportance.DEFAULT, // DEFAULT = sound on completion
+      });
+    }
+    return this.completeChannelId;
+  }
+
+  // ── Public API ────────────────────────────────────────────────────────────
+
+  async displayTransferNotification(fileName: string, progress: number, isSending: boolean) {
+    const channelId = await this.getTransferChannelId();
+
     await notifee.displayNotification({
       id: 'transfer_id',
       title: isSending ? `Sending ${fileName}` : `Receiving ${fileName}`,
@@ -30,14 +59,13 @@ class NotificationService {
   }
 
   async displayCompleteNotification(fileName: string, success: boolean) {
-    const channelId = await notifee.createChannel({
-      id: 'transfer_complete',
-      name: 'Transfer Complete',
-    });
+    const channelId = await this.getCompleteChannelId();
 
     await notifee.displayNotification({
-      title: success ? 'Transfer Completed' : 'Transfer Failed',
-      body: success ? `Successfully transferred ${fileName}` : `Failed to transfer ${fileName}`,
+      title: success ? '✅ Transfer Completed' : '❌ Transfer Failed',
+      body: success
+        ? `Successfully transferred ${fileName}`
+        : `Failed to transfer ${fileName}`,
       android: {
         channelId,
       },

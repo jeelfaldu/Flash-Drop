@@ -6,26 +6,18 @@ import {
   TouchableOpacity,
   Image,
   FlatList,
-  PermissionsAndroid,
   Platform,
-  Alert,
   Dimensions,
   ActivityIndicator,
-  TextInput,
   StatusBar,
   SafeAreaView,
   Modal
 } from 'react-native';
-import { CameraRoll } from "@react-native-camera-roll/camera-roll";
-import RNFS from 'react-native-fs';
-import { pick, types, isErrorWithCode, errorCodes } from '@react-native-documents/picker';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
 import LinearGradient from 'react-native-linear-gradient';
-import DeviceInfo from 'react-native-device-info';
-import Contacts from 'react-native-contacts';
-import { useFocusEffect } from '@react-navigation/native';
 import { useTheme } from '../theme/ThemeContext';
 import { useTransferStore, useMediaStore, useUIStore, useConnectionStore } from '../store';
+import TransferServer from '../utils/TransferServer';
 
 import { PhotosTab } from '../components/send/PhotosTab';
 import { VideosTab } from '../components/send/VideosTab';
@@ -38,8 +30,8 @@ const SendScreen = ({ navigation, route }: any) => {
   const { colors, typography, layout, spacing, isDark } = useTheme();
 
   // Zustand stores
-  const { selectedItems, toggleItem, clearSelection, setSelectedItems } = useTransferStore();
-  const { isConnected, ipAddress } = useConnectionStore();
+  const { selectedItems, toggleItem, clearSelection, setSelectedItems, setFiles, setTransferStats } = useTransferStore();
+  const { isConnected } = useConnectionStore();
   const {
     photos,
     videos,
@@ -48,288 +40,23 @@ const SendScreen = ({ navigation, route }: any) => {
     contacts,
     apps,
     isLoading,
-    setPhotos,
-    setVideos,
-    setDocuments,
-    setAudio,
-    setContacts,
-    setApps,
-    addDocuments,
-    setLoading,
+    checkPermissionsAndLoad,
+    pickAndAddDocument,
   } = useMediaStore();
-  const { activeTab, permissionGranted, setActiveTab, setPermissionGranted } = useUIStore();
+  const { activeTab, setActiveTab } = useUIStore();
   const [fileCategory, setFileCategory] = useState<'audio' | 'docs' | 'apps' | 'browser'>('browser');
   const [previewItem, setPreviewItem] = useState<any>(null);
 
+  // On mount: permissions + media load handled entirely by the store
   useEffect(() => {
-    checkPermissions();
+    checkPermissionsAndLoad();
   }, []);
 
-  const checkPermissions = async () => {
-    if (Platform.OS === 'android') {
-      try {
-        const apiLevel = await DeviceInfo.getApiLevel();
-        let permissions = [
-          PermissionsAndroid.PERMISSIONS.READ_CONTACTS
-        ];
-
-        if (apiLevel >= 33) {
-          permissions.push(
-            PermissionsAndroid.PERMISSIONS.READ_MEDIA_IMAGES,
-            PermissionsAndroid.PERMISSIONS.READ_MEDIA_VIDEO
-          );
-        } else {
-          permissions.push(
-            PermissionsAndroid.PERMISSIONS.READ_EXTERNAL_STORAGE,
-            PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE
-          );
-        }
-
-        const result = await PermissionsAndroid.requestMultiple(permissions);
-
-        const granted = Object.values(result).every(
-          r => r === PermissionsAndroid.RESULTS.GRANTED || r === PermissionsAndroid.RESULTS.NEVER_ASK_AGAIN
-        );
-
-        setPermissionGranted(true);
-        loadMedia();
-        loadContacts(); // Load contacts after permission check
-      } catch (err) {
-        console.warn(err);
-        setLoading(false);
-        Alert.alert("Error", "Failed to check permissions");
-      }
-    } else {
-      setPermissionGranted(true);
-      loadMedia();
-      loadContacts();
-    }
-  };
-
-  const loadContacts = async () => {
-    try {
-      const allContacts = await Contacts.getAll();
-      const formatted = allContacts.map((c, index) => ({
-        id: c.recordID || index.toString(),
-        name: [c.givenName, c.familyName].filter(Boolean).join(' '),
-        phoneNumbers: c.phoneNumbers,
-        type: 'contact',
-        size: 200, // Approximate size for VCF
-        icon: 'account'
-      })).filter(c => c.name); // Filter out empty names
-      setContacts(formatted.sort((a, b) => a.name.localeCompare(b.name)));
-    } catch (e) {
-      console.log("Error loading contacts", e);
-    }
-  };
-
-  const loadMedia = async () => {
-    setLoading(true);
-    try {
-      const photosData = await CameraRoll.getPhotos({
-        first: 100,
-        assetType: 'Photos',
-        include: ['fileSize', 'filename', 'imageSize']
-      });
-      const videoData = await CameraRoll.getPhotos({
-        first: 50,
-        assetType: 'Videos',
-        include: ['fileSize', 'filename', 'playableDuration']
-      });
-
-
-      // Get actual file sizes using RNFS
-      const photosWithSize = await Promise.all(
-        photosData.edges.map(async (e) => {
-          const uri = e.node.image.uri;
-          let size = e.node.image.fileSize || 0;
-          let filePath = e.node.image.filepath || uri;
-
-          if (size === 0) {
-            try {
-              const stat = await RNFS.stat(uri);
-              size = stat.size;
-            } catch (err) {
-              console.log('Could not stat photo:', uri, err);
-            }
-          }
-
-          return {
-            id: uri,
-            uri: uri,
-            type: 'image',
-            folderPath: filePath,
-            name: e.node.image.filename || `IMG_${Date.now()}.jpg`,
-            size: size,
-            timestamp: e.node.timestamp
-          };
-        })
-      );
-
-      const videosWithSize = await Promise.all(
-        videoData.edges.map(async (e) => {
-          const uri = e.node.image.uri;
-          let size = e.node.image.fileSize || 0;
-          let filePath = e.node.image.filepath || uri;
-
-          if (size === 0) {
-            try {
-              const stat = await RNFS.stat(uri);
-              size = stat.size;
-            } catch (err) {
-              console.log('Could not stat video:', uri, err);
-            }
-          }
-
-          return {
-            id: uri,
-            uri: uri,
-            type: 'video',
-            folderPath: filePath,
-            name: e.node.image.filename || `VID_${Date.now()}.mp4`,
-            size: size,
-            duration: e.node.image.playableDuration,
-            timestamp: e.node.timestamp
-          };
-        })
-      );
-
-      setPhotos(photosWithSize);
-      setVideos(videosWithSize);
-
-      // Scan for other files on Android
-      if (Platform.OS === 'android') {
-        await scanStorageFiles();
-      }
-
-    } catch (error) {
-      console.log('Error loading media:', error);
-      Alert.alert("Access Denied", "Cannot load media. Please allow access in Settings.");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const scanStorageFiles = async () => {
-    try {
-      const rootPath = RNFS.ExternalStorageDirectoryPath;
-      let foundDocs: any[] = [];
-      let foundAudio: any[] = [];
-      let foundApps: any[] = [];
-
-      const walkDir = async (dirPath: string, depth = 0) => {
-        // Limit depth to 8 for performance
-        if (depth > 8) return;
-
-        try {
-          const items = await RNFS.readDir(dirPath);
-          for (const item of items) {
-            if (item.isDirectory()) {
-              // Ignore hidden folders and specific system folders
-              if (item.name.startsWith('.') || ['data', 'obb', 'lost+found'].includes(item.name)) continue;
-
-              await walkDir(item.path, depth + 1);
-            } else if (item.isFile()) {
-              const ext = item.name.split('.').pop()?.toLowerCase() || '';
-              const fileItem = {
-                id: item.path,
-                uri: `file://${item.path}`,
-                name: item.name,
-                size: item.size,
-                type: 'document' as const,
-                mime: ext
-              };
-
-              if (['mp3', 'wav', 'm4a', 'aac', 'flac'].includes(ext)) {
-                fileItem.type = 'audio' as any;
-                foundAudio.push(fileItem);
-              } else if (['pdf', 'doc', 'docx', 'xls', 'xlsx', 'txt', 'ppt', 'pptx'].includes(ext)) {
-                foundDocs.push(fileItem);
-              } else if (ext === 'apk') {
-                fileItem.type = 'app' as any;
-                foundApps.push(fileItem);
-              }
-            }
-          }
-        } catch (e) {
-          // Skip folders we can't access
-        }
-      };
-
-      // Comprehensive scan roots for modern Android
-      const scanRoots = [];
-      if (rootPath) {
-        scanRoots.push(
-          `${rootPath}/Download`,
-          `${rootPath}/Downloads`,
-          `${rootPath}/Documents`,
-          `${rootPath}/WhatsApp/Media`,
-          `${rootPath}/Android/media/com.whatsapp/WhatsApp/Media`,
-          `${rootPath}/Telegram`,
-          `${rootPath}/Bluetooth`
-        );
-      }
-
-      // Add direct system paths if they exist
-      if (RNFS.DownloadDirectoryPath) scanRoots.push(RNFS.DownloadDirectoryPath);
-
-      // Filter out duplicates and nulls
-      const uniqueRoots = [...new Set(scanRoots.filter(Boolean))];
-
-      for (const root of uniqueRoots) {
-        if (await RNFS.exists(root)) {
-          await walkDir(root);
-        }
-      }
-
-      if (foundDocs.length > 0) setDocuments(foundDocs);
-      if (foundAudio.length > 0) setAudio(foundAudio);
-      if (foundApps.length > 0) setApps(foundApps);
-
-    } catch (err) {
-      console.log('Global scan error:', err);
-    }
-  };
-
-  const pickDocument = async () => {
-    try {
-      const res = await pick({
-        type: [types.allFiles],
-        allowMultiSelection: true
-      });
-      
-      const newDocs = await Promise.all(res.map(async (doc) => {
-        let size = doc.size || 0;
-
-        if (size === 0) {
-          try {
-            const stat = await RNFS.stat(doc.uri);
-            size = stat.size;
-          } catch (e) {
-            console.log('Could not stat picked document:', doc.uri, e);
-          }
-        }
-
-        return {
-          id: doc.uri,
-          uri: doc.uri,
-          name: doc.name,
-          size: size,
-          type: 'document',
-          mime: doc.type
-        };
-      }));
-
-      addDocuments(newDocs);
-      newDocs.forEach((d: any) => toggleItem(d));
-    } catch (err) {
-      if (isErrorWithCode(err) && err.code === errorCodes.OPERATION_CANCELED) {
-        // user cancelled
-      } else {
-        console.log(err);
-      }
-    }
-  };
+  // pickDocument: store handles fetching, we just toggle the picked docs into selection
+  const pickDocument = useCallback(async () => {
+    const newDocs = await pickAndAddDocument();
+    newDocs.forEach((d: any) => toggleItem(d));
+  }, [pickAndAddDocument, toggleItem]);
 
   const toggleSelection = useCallback((item: any) => {
     toggleItem(item);
@@ -347,11 +74,43 @@ const SendScreen = ({ navigation, route }: any) => {
     if (selectedItems.length === 0) return;
     
     if (isConnected) {
-      navigation.navigate('FileTransfer', { 
-        role: 'sender',
-        initialFiles: selectedItems,
-        deviceName: 'Connected Device'
-      });
+      // If already connected, update server list directly
+      TransferServer.updateFiles(selectedItems);
+
+      if (route.params?.keepConnection) {
+        // Manually update store and go back to existing FileTransfer screen
+        setFiles((prev: any) => {
+          const updated = { ...prev };
+          selectedItems.forEach((f: any) => {
+            // Use filename as key to avoid duplicates
+            if (!updated[f.name]) {
+              updated[f.name] = {
+                name: f.name,
+                size: f.size,
+                progress: 0,
+                status: 'pending',
+                type: f.type || 'file', // Ensure type exists
+                uri: f.uri // Ensure uri exists for thumbnail
+              };
+            }
+          });
+          return updated;
+        });
+
+        const addedSize = selectedItems.reduce((acc, item) => acc + item.size, 0);
+        setTransferStats((prev: any) => ({
+          ...prev,
+          totalSize: (prev.totalSize || 0) + addedSize
+        }));
+
+        navigation.goBack();
+      } else {
+        navigation.navigate('FileTransfer', {
+          role: 'sender',
+          initialFiles: selectedItems,
+          deviceName: 'Connected Device'
+        });
+      }
     } else {
       navigation.navigate('Sharing', { items: selectedItems });
     }
@@ -359,7 +118,7 @@ const SendScreen = ({ navigation, route }: any) => {
     setTimeout(() => {
       clearSelection();
     }, 500);
-  }, [selectedItems, isConnected, navigation, clearSelection]);
+  }, [selectedItems, isConnected, navigation, clearSelection, setFiles, setTransferStats, route.params]);
 
   const toggleDateSelection = useCallback((dateItems: any[]) => {
     const allSelected = dateItems.every(p => selectedItems.find(i => i.id === p.id));
@@ -415,7 +174,7 @@ const SendScreen = ({ navigation, route }: any) => {
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
-      <StatusBar barStyle="light-content" translucent backgroundColor="transparent" />
+      <StatusBar barStyle="light-content" />
 
       {/* Header */}
       <View style={styles.headerWrapper}>

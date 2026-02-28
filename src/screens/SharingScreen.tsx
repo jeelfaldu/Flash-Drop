@@ -6,9 +6,9 @@ import {
   TouchableOpacity,
   SafeAreaView,
   Alert,
+  BackHandler,
   ActivityIndicator,
   Animated,
-  Easing,
   StatusBar,
   Dimensions,
   Platform,
@@ -25,7 +25,7 @@ import { useTheme } from '../theme/ThemeContext';
 import { useConnectionStore, useTransferStore } from '../store';
 
 const SharingScreen = ({ route, navigation }: any) => {
-    const { items } = route.params;
+  const { items = [], mode } = route.params || {};
   const { colors, typography, layout, spacing } = useTheme();
 
   // Zustand stores
@@ -39,59 +39,30 @@ const SharingScreen = ({ route, navigation }: any) => {
 
   // Local UI state
     const [status, setStatus] = useState('initializing');
-  const [activeTab, setActiveTab] = useState('qr');
+
     const [qrData, setQrData] = useState<string>(''); 
     const [groupInfo, setGroupInfo] = useState<any>(null);
 
-  const pulseAnim = useRef(new Animated.Value(0)).current;
-  const rotateAnim = useRef(new Animated.Value(0)).current;
-
   useEffect(() => {
     setupHotspot();
-    // Only stop server/group if we didn't actually connect
+
+    const onBackPress = () => {
+      // Cleanup if user backs out manually with hardware button
+      TransferServer.stop();
+      WifiP2PManager.removeGroup();
+      if (navigation.canGoBack()) navigation.goBack();
+      else (navigation as any).navigate('Home');
+      return true;
+    };
+
+    const backHandler = BackHandler.addEventListener('hardwareBackPress', onBackPress);
+
     return () => {
-      // If we are navigating away but not connected, cleanup.
-      // But if we are connected, keep it alive for FileTransferScreen.
+      backHandler.remove();
+      // Cleanup is explicitly handled by the Back/Cancel buttons
+      // or by the FileTransfer screen once navigation completes.
     };
   }, []);
-
-  useEffect(() => {
-    if (activeTab === 'nearby') {
-      startRadarAnimations();
-    }
-  }, [activeTab]);
-
-  const startRadarAnimations = () => {
-    pulseAnim.stopAnimation();
-    rotateAnim.stopAnimation();
-    pulseAnim.setValue(0);
-    rotateAnim.setValue(0);
-
-    Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulseAnim, {
-          toValue: 1,
-          duration: 3000,
-          easing: Easing.out(Easing.quad),
-          useNativeDriver: true,
-        }),
-        Animated.timing(pulseAnim, {
-          toValue: 0,
-          duration: 0,
-          useNativeDriver: true,
-        })
-      ])
-    ).start();
-
-    Animated.loop(
-      Animated.timing(rotateAnim, {
-        toValue: 1,
-        duration: 4000,
-        easing: Easing.linear,
-        useNativeDriver: true,
-      })
-    ).start();
-  };
 
     const setupHotspot = async () => {
         try {
@@ -127,7 +98,7 @@ const SharingScreen = ({ route, navigation }: any) => {
             setGroupInfo(info);
             setConnected(true);
             setConnectionDetails({ type: 'wifi-direct', ssid: info.ssid, ip: info.ownerIp });
-            setQrData(JSON.stringify({ ssid: info.ssid, pass: info.pass, ip: info.ownerIp }));
+            setQrData(JSON.stringify({ ssid: info.ssid, pass: info.pass, ip: info.ownerIp, mac: info.mac }));
             startServer();
           } else {
             setStatus('error');
@@ -157,7 +128,7 @@ const SharingScreen = ({ route, navigation }: any) => {
   const startServer = () => {
     TransferServer.start(8888, items, (serverStatus) => {
       if (serverStatus.type === 'client_connected') {
-        navigation.navigate('FileTransfer', {
+        navigation.replace('FileTransfer', {
           role: 'sender',
           deviceName: serverStatus.clientAddress,
           initialFiles: items
@@ -167,14 +138,9 @@ const SharingScreen = ({ route, navigation }: any) => {
     setStatus('ready');
   };
 
-  const rotation = rotateAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: ['0deg', '360deg'],
-  });
-
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
-      <StatusBar barStyle="light-content" backgroundColor="transparent" translucent />
+      <StatusBar barStyle="light-content" />
 
       <View style={styles.headerWrapper}>
         <LinearGradient
@@ -185,10 +151,20 @@ const SharingScreen = ({ route, navigation }: any) => {
         />
         <SafeAreaView>
           <View style={styles.headerContent}>
-            <TouchableOpacity onPress={() => navigation.goBack()} style={styles.iconButton}>
+            <TouchableOpacity
+              onPress={() => {
+                // Cleanup if user backs out before connecting
+                TransferServer.stop();
+                WifiP2PManager.removeGroup(); // Attempt to cleanup hotspot
+                navigation.goBack();
+              }}
+              style={styles.iconButton}
+            >
               <Icon name="arrow-left" size={24} color="#FFF" />
             </TouchableOpacity>
-            <Text style={[styles.headerTitle, { fontFamily: typography.fontFamily }]}>Sender</Text>
+            <Text style={[styles.headerTitle, { fontFamily: typography.fontFamily }]}>
+              {mode === 'pairing' ? 'Pair Device' : 'Sender'}
+            </Text>
             <TouchableOpacity style={styles.iconButton}>
               <Icon name="help-circle-outline" size={24} color="#FFF" />
             </TouchableOpacity>
@@ -199,52 +175,6 @@ const SharingScreen = ({ route, navigation }: any) => {
       <View style={styles.contentContainer}>
         <View style={[styles.mainCard, { backgroundColor: colors.surface, ...layout.shadow.medium }]}>
           {status === 'ready' ? (
-            activeTab === 'nearby' ? (
-              <View style={styles.radarWrapper}>
-                <View style={[styles.instructionsContainer, { backgroundColor: colors.background }]}>
-                  <View style={[styles.dot, { backgroundColor: colors.accent }]} />
-                  <Text style={[styles.instructionsText, { color: colors.subtext, fontFamily: typography.fontFamily }]}>
-                    Waiting for receiver...
-                  </Text>
-                </View>
-
-                <View style={styles.radarContainer}>
-                  <View style={[styles.circle, { borderColor: colors.primary, width: 280, height: 280, opacity: 0.1 }]} />
-                  <View style={[styles.circle, { borderColor: colors.primary, width: 200, height: 200, opacity: 0.2 }]} />
-                  <View style={[styles.circle, { borderColor: colors.primary, width: 120, height: 120, opacity: 0.3 }]} />
-
-                  {[0, 1].map((i) => (
-                    <Animated.View key={i} style={[styles.pulseCircle, {
-                      borderColor: colors.primary,
-                      backgroundColor: colors.primary + '15',
-                      opacity: pulseAnim.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0.4, 0.2, 0] }),
-                      transform: [{ scale: pulseAnim.interpolate({ inputRange: [0, 1], outputRange: [0.5, 2.5] }) }]
-                    }]} />
-                  ))}
-
-                  <Animated.View style={[styles.sweep, { transform: [{ rotate: rotation }] }]}>
-                    <LinearGradient
-                      colors={[colors.primary + '66', 'transparent']}
-                      start={{ x: 0, y: 0.5 }}
-                      end={{ x: 1, y: 0.5 }}
-                      style={styles.sweepGradient}
-                    />
-                  </Animated.View>
-
-                  <View style={styles.centerDeviceWrapper}>
-                    <View style={[styles.centerCircle, { backgroundColor: colors.primary }]}>
-                      <Icon name="cellphone" size={32} color="#FFF" />
-                    </View>
-                  </View>
-                </View>
-
-                {groupInfo?.ownerIp && (
-                  <Text style={[styles.diagnosticsText, { color: colors.subtext, fontFamily: typography.fontFamily }]}>
-                    Server IP: {groupInfo.ownerIp}
-                  </Text>
-                )}
-              </View>
-            ) : (
               <View style={styles.qrWrapper}>
                 <View style={styles.qrCard}>
                   {qrData ? (
@@ -253,7 +183,9 @@ const SharingScreen = ({ route, navigation }: any) => {
                           <QRCode value={qrData} size={200} color={colors.primary} backgroundColor="white" />
                         </View>
                         <Text style={[styles.qrHint, { color: colors.subtext, fontFamily: typography.fontFamily }]}>
-                          Ask the receiver to scan this QR code
+                      {mode === 'pairing'
+                        ? 'Scan this code on the other device to pair'
+                        : 'Ask the receiver to scan this QR code'}
                         </Text>
                         {groupInfo && groupInfo.ssid && (
                           <View style={[styles.manualInfo, { backgroundColor: colors.background }]}>
@@ -267,52 +199,38 @@ const SharingScreen = ({ route, navigation }: any) => {
                       <ActivityIndicator size="large" color={colors.primary} />
                     )}
                   </View>
-                </View>
-              )
+            </View>
+          ) : status === 'error' ? (
+            <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 }}>
+              <Icon name="alert-circle-outline" size={60} color={colors.error} />
+              <Text style={{ marginTop: 15, color: colors.text, fontSize: 18, fontWeight: '700', fontFamily: typography.fontFamily }}>Setup Failed</Text>
+              <Text style={{ marginTop: 8, color: colors.subtext, textAlign: 'center', marginBottom: 24, fontFamily: typography.fontFamily }}>
+                Could not create a hotspot. Please check permissions and try again.
+              </Text>
+              <TouchableOpacity
+                style={{ backgroundColor: colors.primary, paddingHorizontal: 32, paddingVertical: 12, borderRadius: 12 }}
+                onPress={setupHotspot}
+              >
+                <Text style={{ color: '#FFF', fontWeight: '700' }}>Retry Setup</Text>
+              </TouchableOpacity>
+            </View>
           ) : (
               <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
                 <ActivityIndicator size="large" color={colors.primary} />
                 <Text style={{ marginTop: 15, color: colors.subtext, fontFamily: typography.fontFamily }}>
-                  Setting up hotspot...
+                    {status === 'checking_connection' ? 'Checking network services...' :
+                      status === 'creating_hotspot' ? 'Creating Wi-Fi Direct Group...' :
+                        status === 'getting_info' ? 'Gathering connection details...' :
+                          'Preparing transfer session...'}
                 </Text>
+                  <TouchableOpacity
+                    style={{ marginTop: 30, padding: 10 }}
+                    onPress={() => navigation.goBack()}
+                  >
+                    <Text style={{ color: colors.error, fontWeight: '600' }}>Cancel</Text>
+                  </TouchableOpacity>
               </View>
           )}
-        </View>
-
-        <View style={[styles.tabsContainer, { backgroundColor: colors.surface, padding: 4, borderRadius: 20 }]}>
-          <TouchableOpacity
-            style={[
-              styles.tabItem,
-              activeTab === 'nearby' && { backgroundColor: colors.primary }
-            ]}
-            onPress={() => setActiveTab('nearby')}
-          >
-            <Icon name="radar" size={20} color={activeTab === 'nearby' ? '#FFF' : colors.subtext} />
-            <Text style={[
-              styles.tabText,
-              {
-                color: activeTab === 'nearby' ? '#FFF' : colors.subtext,
-                fontFamily: typography.fontFamily
-              }
-            ]}>Radar</Text>
-            </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[
-              styles.tabItem,
-              activeTab === 'qr' && { backgroundColor: colors.primary }
-            ]}
-            onPress={() => setActiveTab('qr')}
-          >
-            <Icon name="qrcode-scan" size={20} color={activeTab === 'qr' ? '#FFF' : colors.subtext} />
-            <Text style={[
-              styles.tabText,
-              {
-                color: activeTab === 'qr' ? '#FFF' : colors.subtext,
-                fontFamily: typography.fontFamily
-              }
-            ]}>QR Code</Text>
-            </TouchableOpacity>
         </View>
       </View>
     </View>
@@ -363,26 +281,12 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     marginBottom: 20
   },
-  radarWrapper: { flex: 1, alignItems: 'center', paddingTop: 20 },
-  instructionsContainer: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 10, borderRadius: 20, marginBottom: 20 },
-  dot: { width: 8, height: 8, borderRadius: 4, marginRight: 10 },
-  instructionsText: { fontSize: 13 },
-  radarContainer: { width: 300, height: 300, justifyContent: 'center', alignItems: 'center', marginVertical: 10 },
-  circle: { position: 'absolute', borderRadius: 150, borderWidth: 1 },
-  pulseCircle: { position: 'absolute', width: 100, height: 100, borderRadius: 50, borderWidth: 1 },
-  sweep: { position: 'absolute', width: 300, height: 300, borderRadius: 150, overflow: 'hidden' },
-  sweepGradient: { width: 150, height: 300, position: 'absolute', left: 150 },
-  centerDeviceWrapper: { zIndex: 10 },
-  centerCircle: { width: 80, height: 80, borderRadius: 40, alignItems: 'center', justifyContent: 'center', elevation: 4 },
   qrWrapper: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 20 },
   qrCard: { alignItems: 'center' },
   qrHint: { textAlign: 'center', marginTop: 24, lineHeight: 20, paddingHorizontal: 20, fontSize: 16, fontWeight: '500' },
   manualInfo: { marginTop: 30, padding: 20, borderRadius: 16, width: '100%', alignItems: 'center' },
   manualTitle: { fontWeight: '700', marginBottom: 12, fontSize: 16 },
   manualText: { fontSize: 14, fontWeight: '600', marginVertical: 2 },
-  tabsContainer: { flexDirection: 'row', elevation: 5 },
-  tabItem: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 14, borderRadius: 16 },
-  tabText: { fontWeight: '600', marginLeft: 8 },
   diagnosticsText: { fontSize: 12, marginTop: 10 },
 });
 

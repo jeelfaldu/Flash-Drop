@@ -4,7 +4,7 @@ import RNFS from 'react-native-fs';
 import { Buffer } from 'buffer';
 import DeviceInfo from 'react-native-device-info';
 import { saveHistoryItem } from './HistoryService';
-import WifiManager from 'react-native-wifi-reborn';
+import DiscoveryManager from './DiscoveryManager';
 
 export type TransferStatus = {
     type: 'log' | 'progress' | 'complete' | 'connection';
@@ -25,7 +25,12 @@ export class TransferClient {
     private isProbing = false;
     private downloadedFiles = new Set<string>();
     public onStatus?: (status: TransferStatus) => void;
-    
+
+  // Max auto-retries per file on transient errors (network blip, timeout)
+  private static readonly MAX_RETRIES = 3;
+  // Base delay for exponential backoff: 1s, 2s, 4s
+  private static readonly RETRY_BASE_DELAY_MS = 1000;
+
     start(port = 8888, saveDir: string, specificIp?: string) {
         console.log(`[TransferClient] Starting client on port ${port}...`);
         this.shouldStop = false;
@@ -41,6 +46,15 @@ export class TransferClient {
         this.isProbing = false;
     }
 
+  /**
+   * Remove a file from the "already downloaded" set so the retry logic
+   * treats it as a new file and re-downloads (resuming from partial).
+   */
+  clearFailedFile(fileName: string, fileSize: number) {
+    this.downloadedFiles.delete(fileName + fileSize);
+    console.log(`[TransferClient] Cleared ${fileName} from downloaded set — will resume on next poll.`);
+  }
+
     private reportStatus(status: TransferStatus) {
         if (this.onStatus) {
             this.onStatus(status);
@@ -51,245 +65,313 @@ export class TransferClient {
         if (this.isProbing || this.shouldStop) return;
         this.isProbing = true;
 
-        this.reportStatus({ type: 'log', message: "Discovery started...", connected: false });
+      this.reportStatus({ type: 'log', message: '🔍 Discovering sender...', connected: false });
 
-        const possibleIps = new Set<string>();
+      let foundIp: string | null = null;
+
+      // ── If caller already knows the IP (e.g. from QR scan), probe it first ──
         if (specificIp && specificIp !== '0.0.0.0' && specificIp !== '127.0.0.1') {
-            possibleIps.add(specificIp);
-        }
+          this.reportStatus({
+            type: 'log',
+            message: `🎯 Trying known IP: ${specificIp}...`,
+            connected: false
+          });
 
-        possibleIps.add('192.168.49.1'); 
-        possibleIps.add('192.168.43.1'); 
-        possibleIps.add('192.168.45.1'); 
-        possibleIps.add('10.0.0.1');
-
-        this.findSenderAndConnect(possibleIps, port, saveDir, 1);
-    }
-
-    private async findSenderAndConnect(ipSet: Set<string>, port: number, saveDir: string, attempt: number) {
-        if (this.shouldStop) { this.isProbing = false; return; }
-        
-        if (attempt > 40) { 
-            this.reportStatus({ type: 'log', message: "Discovery Timeout. Restart both apps.", connected: false });
-            this.isProbing = false;
-            return;
-        }
-
-        if (Platform.OS === 'android') {
-            try { await WifiManager.forceWifiUsage(true); } catch(e) {}
-        }
-
-        if (attempt % 5 === 2) {
-            try {
-                const wm: any = WifiManager;
-                const dhcp = await wm.getDhcpInfo();
-                if (dhcp?.gateway && dhcp.gateway !== '0.0.0.0') ipSet.add(dhcp.gateway);
-            } catch (e) {}
-
-            try {
-                const myIp = await DeviceInfo.getIpAddress();
-                if (myIp && myIp.includes('.') && myIp !== '0.0.0.0') {
-                    const parts = myIp.split('.');
-                    parts[3] = '1';
-                    ipSet.add(parts.join('.'));
-                }
-            } catch (e) {}
-        }
-
-        const ips = Array.from(ipSet).filter(ip => ip && ip !== '0.0.0.0').slice(-20); // Keep set reasonable
-        this.reportStatus({ type: 'log', message: `Discovery [${attempt}/40]...`, connected: false });
-
-        for (let i = 0; i < ips.length; i += 2) {
+          let ok = false;
+          // Retry up to 10 times to allow the Wi-Fi connection to fully establish
+          for (let i = 0; i < 10; i++) {
             if (this.shouldStop) break;
-            const batch = ips.slice(i, i + 2);
-            const results = await Promise.all(batch.map(ip => this.trySingleIp(ip, port)));
-            const foundIdx = results.findIndex(r => r === true);
-            
-            if (foundIdx !== -1) {
-                const foundIp = batch[foundIdx];
-                console.log(`[TransferClient] Found sender at ${foundIp}`);
-                this.isProbing = false;
-                this.persistentLoop(foundIp, port, saveDir);
-                return;
-            }
+            ok = await DiscoveryManager.probeTcpPort(specificIp, port, 3000);
+            if (ok) break;
+
+            this.reportStatus({
+              type: 'log',
+              message: `⏳ Waiting for network... (Attempt ${i + 1}/10)`,
+              connected: false
+            });
+            await new Promise(r => setTimeout(r, 2000));
+          }
+
+          if (ok && !this.shouldStop) {
+            foundIp = specificIp;
+          }
         }
 
-        setTimeout(() => this.findSenderAndConnect(ipSet, port, saveDir, attempt + 1), 1500);
+      // ── Full discovery (mDNS primary → subnet scan fallback) ──
+      if (!foundIp && !this.shouldStop) {
+        foundIp = await DiscoveryManager.discoverSender(
+          port,
+          (msg) => this.reportStatus({ type: 'log', message: msg, connected: false })
+        );
+      }
+
+      this.isProbing = false;
+
+      if (foundIp && !this.shouldStop) {
+        console.log(`[TransferClient] Sender found at ${foundIp}`);
+        this.persistentLoop(foundIp, port, saveDir);
+      } else if (!this.shouldStop) {
+        this.reportStatus({
+          type: 'log',
+          message: '❌ Sender not found. Make sure both devices are on the same Wi-Fi.',
+          connected: false
+        });
+      }
     }
 
     private async persistentLoop(ip: string, port: number, saveDir: string) {
-        this.reportStatus({ type: 'connection', message: "Connected!", connected: true });
+      this.reportStatus({ type: 'connection', message: '✅ Connected!', connected: true });
         console.log(`[TransferClient] Standing by for files from ${ip}...`);
-        
+
+      // Force traffic through Wi-Fi on Android (prevent fallback to mobile data)
+      if (Platform.OS === 'android') {
+        try {
+          const WifiManager = require('react-native-wifi-reborn').default;
+          await WifiManager.forceWifiUsage(true);
+        } catch (_) { }
+      }
+
         let failCount = 0;
-        while (!this.shouldStop) {
-            if (!this.isTransferring) {
-                try {
-                    const files = await this.fetchMetadata(ip, port);
-                    failCount = 0;
-                    if (files && files.length > 0) {
-                        const newFiles = files.filter((f: any) => !this.downloadedFiles.has(f.name + (f.size || 0)));
+      while (!this.shouldStop) {
+        try {
+          const files = await this.fetchMetadata(ip, port);
+          failCount = 0;
+
+          if (files && files.length > 0) {
+                this.reportStatus({
+                  type: 'log',
+                  message: this.isTransferring ? '⬇️ Downloading...' : '⏳ Standing by...',
+                  connected: true,
+                  files
+                });
+
+                if (!this.isTransferring) {
+                  const newFiles = files.filter(
+                    (f: any) => !this.downloadedFiles.has(f.name + (f.size || 0))
+                  );
                         if (newFiles.length > 0) {
                             console.log(`[TransferClient] New files detected: ${newFiles.length}`);
-                            this.isTransferring = true;
-                            this.reportStatus({ type: 'log', message: `Found ${newFiles.length} new files`, connected: true, files: files });
+                          this.isTransferring = true;
                             await this.downloadAll(newFiles, ip, port, saveDir);
                             this.isTransferring = false;
                         }
                     }
-                } catch (e) {
-                    failCount++;
-                    console.log(`[TransferClient] Standing by... (Retry ${failCount})`);
-                    if (failCount > 10 && !this.shouldStop) {
-                        console.log(`[TransferClient] Connection lost to ${ip}. Re-probing...`);
-                        this.reportStatus({ type: 'log', message: "Connection lost. Reconnecting...", connected: false });
-                        this.initConnection(port, saveDir, ip);
-                        return;
-                    }
-                }
-            }
-            await new Promise(r => setTimeout(r, 2500));
+              }
+        } catch (e) {
+          failCount++;
+          console.log(`[TransferClient] Polling error (retry ${failCount})`);
+          if (failCount > 10 && !this.shouldStop) {
+            console.log(`[TransferClient] Connection lost to ${ip}. Re-discovering...`);
+            this.reportStatus({
+              type: 'log',
+              message: '🔄 Connection lost. Re-discovering...',
+              connected: false
+            });
+            this.initConnection(port, saveDir, ip);
+            return;
+          }
+        }
+        // Adaptive polling: fast when active transfer, slow when idle
+        await new Promise(r => setTimeout(r, this.isTransferring ? 500 : 2000));
         }
     }
 
-    private trySingleIp(ip: string, port: number): Promise<boolean> {
-        return new Promise((resolve) => {
-            let finished = false;
-            let client: any = null;
-            const cleanup = () => { if (client) { try { client.destroy(); client = null; } catch(e){} } };
+  // trySingleIp removed — use DiscoveryManager.probeTcpPort() instead
 
-            const timer = setTimeout(() => {
-                if (finished) return;
-                finished = true;
-                cleanup();
-                resolve(false);
-            }, 3000);
-
-            try {
-                client = TcpSocket.createConnection({ port, host: ip }, () => {
-                    if (finished) { cleanup(); return; }
-                    finished = true;
-                    clearTimeout(timer);
-                    cleanup();
-                    resolve(true);
-                });
-                client.on('error', () => {
-                    if (finished) return;
-                    finished = true;
-                    clearTimeout(timer);
-                    cleanup();
-                    resolve(false);
-                });
-            } catch (e) {
-                if (!finished) { finished = true; clearTimeout(timer); cleanup(); resolve(false); }
-            }
-        });
-    }
-
-    private fetchMetadata(ip: string, port: number): Promise<any[]> {
-        return new Promise((resolve, reject) => {
-            let buffer = '';
-            let finished = false;
-            let client: any = null;
-            const cleanup = () => { if (client) { try { client.destroy(); client = null; } catch(e){} } };
-
-            const timer = setTimeout(() => {
-                if (finished) return;
-                finished = true; cleanup(); reject(new Error("Metadata Timeout"));
-            }, 8000);
-
-            try {
-                client = TcpSocket.createConnection({ port, host: ip }, () => {
-                    if (!finished) client.write('GET_METADATA');
-                });
-                client.on('data', (data: any) => {
-                    if (finished) return;
-                    buffer += data.toString();
-                    if (buffer.includes('<EOF>')) {
-                        finished = true; clearTimeout(timer);
-                        const parts = buffer.split('<EOF>');
-                        cleanup();
-                        try { resolve(JSON.parse(parts[0].trim())); } catch(e) { reject(e); }
-                    }
-                });
-                client.on('error', (err: any) => {
-                    if (finished) return;
-                    finished = true; clearTimeout(timer); cleanup(); reject(err);
-                });
-            } catch (e) { if (!finished) { finished = true; clearTimeout(timer); cleanup(); reject(e); } }
-        });
+  private async fetchMetadata(ip: string, port: number): Promise<any[]> {
+    const url = `http://${ip}:${port}/api/files`;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
+    try {
+          const response = await fetch(url, { signal: controller.signal });
+          clearTimeout(timeoutId);
+          if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+          return await response.json();
+        } catch (e) {
+          clearTimeout(timeoutId);
+          throw e;
+        }
     }
 
     async downloadAll(files: any[], ip: string, port: number, saveDir: string) {
-        if (!(await RNFS.exists(saveDir))) { await RNFS.mkdir(saveDir).catch(()=>{}); }
-        for (const file of files) {
-            if (this.shouldStop) break;
-            try {
-                console.log(`[TransferClient] Downloading: ${file.name}`);
-                await this.downloadFile(file, ip, port, saveDir);
-                this.downloadedFiles.add(file.name + (file.size || 0));
-                console.log(`[TransferClient] Finished: ${file.name}`);
-            } catch (e) {
-                console.error(`[TransferClient] Failed to download ${file.name}:`, e);
-            }
+      if (!(await RNFS.exists(saveDir))) { await RNFS.mkdir(saveDir).catch(() => { }); }
+
+      // ── 3-Tier Parallelism Strategy ───────────────────────────────────
+      // Small  (<5MB):   3 parallel — fast, minimal memory pressure
+      // Medium (5-50MB): 2 parallel — balanced speed + stability
+      // Large  (>50MB):  1 at a time — maximizes bandwidth per file
+      const smallFiles = files.filter(f => (f.size || 0) < 5 * 1024 * 1024);
+      const mediumFiles = files.filter(f => (f.size || 0) >= 5 * 1024 * 1024 && (f.size || 0) < 50 * 1024 * 1024);
+      const largeFiles = files.filter(f => (f.size || 0) >= 50 * 1024 * 1024);
+
+      const runBatch = async (batch: any[], concurrency: number) => {
+        for (let i = 0; i < batch.length; i += concurrency) {
+          if (this.shouldStop) break;
+          const chunk = batch.slice(i, i + concurrency);
+          await Promise.all(
+            chunk.map(file =>
+              this.downloadFile(file, ip, port, saveDir)
+                .then(() => this.downloadedFiles.add(file.name + (file.size || 0)))
+                    .catch(e => console.error(`[TransferClient] Download failed: ${file.name}`, e))
+                )
+              );
         }
-        this.reportStatus({ type: 'complete', message: "Batch Completed", connected: true });
+      };
+
+      await runBatch(smallFiles, 3);
+      await runBatch(mediumFiles, 2);
+      await runBatch(largeFiles, 1);
+
+      this.reportStatus({ type: 'complete', message: '✅ Batch Completed', connected: true });
     }
 
-    private downloadFile(file: any, ip: string, port: number, saveDir: string): Promise<void> {
-        return new Promise((resolve, reject) => {
-            const dest = `${saveDir}/${file.name}`;
-            let finished = false;
-            let client: any = null;
-            let received = 0;
-            const total = file.size;
-            let lastPct = 0;
-            let inactivityTimer: any = null;
+  private downloadFile(file: any, ip: string, port: number, saveDir: string): Promise<void> {
+    return this.downloadFileWithRetry(file, ip, port, saveDir, 0);
+    }
 
-            const resetWatchdog = () => {
-                if (inactivityTimer) clearTimeout(inactivityTimer);
-                inactivityTimer = setTimeout(() => {
-                    if (finished) return;
-                    console.log(`[TransferClient] Inactivity timeout for ${file.name}`);
-                    finished = true; cleanup(); reject(new Error("Transfer Stalled"));
-                }, 15000);
-            };
+  /**
+   * Core download logic with exponential-backoff retry.
+   *
+   * On NETWORK ERROR:
+   *   - Keep partial file (resume on next attempt via Range header)
+   *   - Wait: 1s, 2s, 4s between retries
+   *   - After MAX_RETRIES, reject so batch can continue with other files
+   *
+   * On BAD HTTP STATUS (4xx/5xx):
+   *   - Delete partial (unrecoverable for this session)
+   *   - Reject immediately (no point retrying)
+   */
+  private async downloadFileWithRetry(
+    file: any,
+    ip: string,
+    port: number,
+    saveDir: string,
+    attempt: number
+  ): Promise<void> {
+        const dest = `${saveDir}/${file.name}`;
+      const total: number = file.size || 0;
+      const maxRetries = TransferClient.MAX_RETRIES;
 
-            const cleanup = () => { 
-                if (inactivityTimer) clearTimeout(inactivityTimer);
-                if (client) { try { client.destroy(); client = null; } catch(e){} } 
-            };
+      // ── Integrity / Skip Check ────────────────────────────────────────────
+      if (await RNFS.exists(dest)) {
+            const stat = await RNFS.stat(dest);
+          if (stat.size >= total && total > 0) {
+            console.log(`[TransferClient] ✅ ${file.name} already complete, skipping.`);
+            this.reportStatus({
+              type: 'progress',
+              connected: true,
+              fileProgress: { name: file.name, percent: 100, received: total, total }
+            });
+            return;
+        }
+      }
 
-            RNFS.unlink(dest).catch(() => {});
-            resetWatchdog();
-            
-            try {
-                client = TcpSocket.createConnection({ port, host: ip }, () => {
-                    if (!finished) client.write(`GET_FILE:${file.name}`);
-                });
-                client.on('data', async (data: any) => {
-                    if (finished) return;
-                    resetWatchdog();
-                    try {
-                        const b64 = (typeof data === 'string') ? Buffer.from(data).toString('base64') : data.toString('base64');
-                        await RNFS.appendFile(dest, b64, 'base64');
-                        received += (typeof data === 'string' ? data.length : data.byteLength);
-                        
-                        const pct = Math.floor((received / total) * 100);
-                        if (pct >= lastPct + 5 || received >= total) {
-                            lastPct = pct;
-                            this.reportStatus({ type: 'progress', connected: true, fileProgress: { name: file.name, percent: pct, received, total } });
-                        }
-                        if (received >= total) {
-                            finished = true; cleanup();
-                            saveHistoryItem({ fileName: file.name, fileSize: file.size, type: file.type || 'unknown', role: 'received', status: 'success' });
-                            resolve();
-                        }
-                    } catch(e) { finished = true; cleanup(); reject(e); }
-                });
-                client.on('error', (e: any) => { if (finished) return; finished = true; cleanup(); reject(e); });
-            } catch (e) { finished = true; cleanup(); reject(e); }
-        });
+      // ── Calculate resume offset ───────────────────────────────────────────
+      let resumeFrom = 0;
+      if (await RNFS.exists(dest)) {
+        const stat = await RNFS.stat(dest);
+        if (stat.size > 0) {
+          resumeFrom = stat.size;
+          const pct = Math.min(99, Math.floor((resumeFrom / total) * 100));
+          console.log(`[TransferClient] ⏩ Attempt ${attempt + 1}/${maxRetries + 1} — Resuming ${file.name} from byte ${resumeFrom} (${pct}%)`);
+          this.reportStatus({
+            type: 'progress',
+            connected: true,
+            fileProgress: { name: file.name, percent: pct, received: resumeFrom, total }
+          });
+        }
+        } else {
+          this.reportStatus({
+            type: 'progress',
+            connected: true,
+            fileProgress: { name: file.name, percent: 0, received: 0, total }
+          });
+        }
+
+      const downloadUrl = `http://${ip}:${port}/api/download?name=${encodeURIComponent(file.name)}`;
+      const headers: Record<string, string> = {};
+      if (resumeFrom > 0) {
+        headers['Range'] = `bytes=${resumeFrom}-`;
+      }
+
+      try {
+          console.log(`[TransferClient] ⬇️  Downloading: ${file.name} from byte ${resumeFrom}`);
+
+          const { promise } = RNFS.downloadFile({
+                fromUrl: downloadUrl,
+                toFile: dest,
+              headers,
+                progressDivider: 2,
+              begin: () => console.log(`[TransferClient] Download begin: ${file.name}`),
+                progress: (res) => {
+                  const received = resumeFrom + res.bytesWritten;
+                  const expectedTotal = total > 0 ? total : (res.contentLength + resumeFrom);
+                  const pct = Math.min(100, Math.floor((received / expectedTotal) * 100));
+                  this.reportStatus({
+                    type: 'progress',
+                    connected: true,
+                    fileProgress: { name: file.name, percent: pct, received, total: expectedTotal }
+                  });
+                }
+            });
+
+          const res = await promise;
+
+          // ── 200 OK (full) or 206 Partial Content (resumed) = success ─────
+          if (res.statusCode === 200 || res.statusCode === 206) {
+            // Final integrity check: file size must match declaration
+            if (total > 0) {
+              const finalStat = await RNFS.stat(dest).catch(() => null);
+              if (finalStat && finalStat.size < total) {
+                console.warn(`[TransferClient] ⚠️  ${file.name} size mismatch (got ${finalStat.size}, expected ${total}). Will resume.`);
+                // File is partial — do not mark as complete, let next poll resume it
+                return;
+              }
+            }
+
+            this.reportStatus({
+              type: 'progress',
+              connected: true,
+              fileProgress: { name: file.name, percent: 100, received: total, total }
+            });
+            saveHistoryItem({
+              fileName: file.name,
+              fileSize: file.size,
+              type: file.type || 'unknown',
+              role: 'received',
+              status: 'success'
+            });
+            console.log(`[TransferClient] ✅ Download complete: ${file.name}`);
+            return;
+          }
+
+          // ── Bad HTTP status — unrecoverable, discard partial ─────────────
+          await RNFS.unlink(dest).catch(() => { });
+          throw new Error(`HTTP ${res.statusCode} — unrecoverable, discarding partial file.`);
+
+        } catch (e: any) {
+          const isLastAttempt = attempt >= maxRetries;
+
+          if (isLastAttempt || this.shouldStop) {
+            // Partial file is KEPT so the next session's retry can resume
+            console.error(`[TransferClient] ❌ ${file.name} failed after ${attempt + 1} attempt(s): ${e.message}`);
+            throw e; // Let batch handle the error
+            }
+
+          // ── Exponential backoff before next attempt ───────────────────────
+          const delayMs = TransferClient.RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
+          console.warn(`[TransferClient] ⚠️  ${file.name} failed (attempt ${attempt + 1}/${maxRetries + 1}). Retrying in ${delayMs}ms...`);
+          this.reportStatus({
+            type: 'log',
+            message: `⚠️ ${file.name} — retrying in ${delayMs / 1000}s... (${attempt + 1}/${maxRetries})`,
+            connected: true
+            });
+
+          await new Promise(r => setTimeout(r, delayMs));
+
+          // Recurse with incremented attempt counter
+          return this.downloadFileWithRetry(file, ip, port, saveDir, attempt + 1);
+        }
     }
 }
 

@@ -33,7 +33,7 @@ export const Colors = {
     success: '#00D189',
     error: '#FF6B6B',
     warning: '#FFC048',
-    gradient: ['#1A1D23', '#000000'],
+    gradient: ['#1A0533', '#2D1B6B', '#0F1115'], // ✅ Deep space purple → rich dark
   }
 };
 
@@ -143,8 +143,12 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     <ThemeContext.Provider value={{ mode, colors, spacing: Spacing, layout: Layout, typography: Typography, setMode, isDark, toggleTheme }}>
       <StatusBar
         barStyle={isDark ? "light-content" : "dark-content"}
-        backgroundColor={isDark ? colors.background : "transparent"}
-        translucent={true}
+        {...Platform.select({
+          android: {
+            backgroundColor: isDark ? colors.background : "transparent",
+            translucent: true
+          }
+        })}
       />
       {children}
     </ThemeContext.Provider>

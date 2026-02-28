@@ -1,7 +1,7 @@
 import React, { useEffect } from 'react';
-import { NavigationContainer } from '@react-navigation/native';
+import { NavigationContainer, createNavigationContainerRef } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { BackHandler, PermissionsAndroid, Platform } from 'react-native';
+import { BackHandler, PermissionsAndroid, Platform, View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 
 import HomeScreen from './src/screens/HomeScreen';
 import SendScreen from './src/screens/SendScreen';
@@ -9,8 +9,58 @@ import ReceiveScreen from './src/screens/ReceiveScreen';
 import HistoryScreen from './src/screens/HistoryScreen';
 import SharingScreen from './src/screens/SharingScreen';
 import FileTransferScreen from './src/screens/FileTransferScreen';
+import PCConnectionScreen from './src/screens/PCConnectionScreen';
 import { requestConnectPermissions } from './src/utils/permissionHelper';
 import { ThemeProvider, useTheme } from './src/theme/ThemeContext';
+import GlobalTransferOverlay from './src/components/GlobalTransferOverlay';
+import { ToastProvider } from './src/components/Toast';
+
+export const navigationRef = createNavigationContainerRef();
+
+// ── Global Error Boundary ─────────────────────────────────────────────────────
+interface ErrorBoundaryState { hasError: boolean; error: Error | null; }
+class ErrorBoundary extends React.Component<{ children: React.ReactNode }, ErrorBoundaryState> {
+  constructor(props: any) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    console.error('[ErrorBoundary] Caught error:', error, info);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <View style={errStyles.container}>
+          <Text style={errStyles.emoji}>⚠️</Text>
+          <Text style={errStyles.title}>Something went wrong</Text>
+          <Text style={errStyles.message}>
+            {this.state.error?.message || 'An unexpected error occurred.'}
+          </Text>
+          <TouchableOpacity
+            style={errStyles.btn}
+            onPress={() => this.setState({ hasError: false, error: null })}
+          >
+            <Text style={errStyles.btnText}>Try Again</Text>
+          </TouchableOpacity>
+        </View>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+const errStyles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: '#0F1115', alignItems: 'center', justifyContent: 'center', padding: 32 },
+  emoji: { fontSize: 60, marginBottom: 20 },
+  title: { fontSize: 22, fontWeight: '800', color: '#F7F9FC', marginBottom: 12 },
+  message: { fontSize: 14, color: '#9CA3AF', textAlign: 'center', lineHeight: 22, marginBottom: 32 },
+  btn: { backgroundColor: '#7C4DFF', paddingHorizontal: 32, paddingVertical: 14, borderRadius: 16 },
+  btnText: { color: '#FFF', fontSize: 16, fontWeight: '700' },
+});
+// ─────────────────────────────────────────────────────────────────────────────
 
 const Stack = createNativeStackNavigator();
 
@@ -18,7 +68,7 @@ const AppNavigator = () => {
   const { colors, isDark } = useTheme();
 
   return (
-    <NavigationContainer>
+    <NavigationContainer ref={navigationRef}>
       <Stack.Navigator
         screenOptions={{
           headerStyle: { backgroundColor: colors.background },
@@ -36,7 +86,9 @@ const AppNavigator = () => {
         <Stack.Screen name="History" component={HistoryScreen} />
         <Stack.Screen name="Sharing" component={SharingScreen} />
         <Stack.Screen name="FileTransfer" component={FileTransferScreen} />
+        <Stack.Screen name="PCConnection" component={PCConnectionScreen} />
       </Stack.Navigator>
+      <GlobalTransferOverlay />
     </NavigationContainer>
   );
 };
@@ -47,9 +99,13 @@ const App = () => {
   }, []);
 
   return (
-    <ThemeProvider>
-      <AppNavigator />
-    </ThemeProvider>
+    <ErrorBoundary>
+      <ThemeProvider>
+        <ToastProvider>
+          <AppNavigator />
+        </ToastProvider>
+      </ThemeProvider>
+    </ErrorBoundary>
   );
 };
 

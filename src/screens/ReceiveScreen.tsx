@@ -12,7 +12,8 @@ import {
   StatusBar,
   Dimensions,
   Animated,
-  Easing
+  Easing,
+  BackHandler
 } from 'react-native';
 import { Camera, useCameraDevice, useCodeScanner } from 'react-native-vision-camera';
 import WifiManager from 'react-native-wifi-reborn';
@@ -25,6 +26,8 @@ import RNFS from 'react-native-fs';
 import { useNavigation } from '@react-navigation/native';
 import { useTheme } from '../theme/ThemeContext';
 import { useConnectionStore, useUIStore } from '../store';
+import RadarPulse from '../components/RadarPulse';
+import HapticUtil from '../utils/HapticUtil';
 
 const { width } = Dimensions.get('window');
 
@@ -35,8 +38,9 @@ interface TransferringFile {
     status: 'pending' | 'downloading' | 'completed' | 'error';
 }
 
-const ReceiveScreen = () => {
+const ReceiveScreen = ({ route }: any) => {
   const navigation = useNavigation();
+  const isConnectMode = route?.params?.mode === 'connect';
   const { colors, typography, layout, spacing } = useTheme();
 
   // Zustand stores
@@ -49,9 +53,8 @@ const ReceiveScreen = () => {
   } = useConnectionStore();
 
   // Local state (UI-specific, not persisted)
-  const [activeTab, setActiveTab] = useState<'nearby' | 'qr'>('qr');
+
   const [hasPermission, setHasPermission] = useState(false);
-  const [wifiList, setWifiList] = useState<any[]>([]);
   const [connectionStatus, setConnectionStatus] = useState<string>('idle'); 
   const [transferringFiles, setTransferringFiles] = useState<Record<string, TransferringFile>>({});
   const [localIp, setLocalIp] = useState('');
@@ -63,7 +66,7 @@ const ReceiveScreen = () => {
 
   useEffect(() => {
     if (isConnected && ipAddress) {
-      (navigation as any).navigate('FileTransfer', {
+      (navigation as any).replace('FileTransfer', {
         role: 'receiver',
         deviceName: ssid || 'Sender',
         initialFiles: []
@@ -78,23 +81,27 @@ const ReceiveScreen = () => {
         setLocalIp(ip);
         setConnectionDetails({ type: null, ip });
       });
-      startWifiScan();
+
     })();
     // Cleanup handled explicitly via disconnect or app close
     return () => { };
   }, []);
 
   useEffect(() => {
-    if (activeTab === 'qr') startQRAnimation();
-    else startRadarAnimations();
-  }, [activeTab]);
+    startQRAnimation();
 
-  const startWifiScan = async () => {
-    try {
-      const list = await WifiManager.reScanAndLoadWifiList();
-      if (Array.isArray(list)) setWifiList(list.sort((a, b) => b.level - a.level));
-    } catch (e) { }
-  };
+    const onBackPress = () => {
+      TransferClient.stop();
+      if (navigation.canGoBack()) navigation.goBack();
+      else (navigation as any).navigate('Home');
+      return true;
+    };
+
+    const backHandler = BackHandler.addEventListener('hardwareBackPress', onBackPress);
+    return () => backHandler.remove();
+  }, []);
+
+
 
   const startQRAnimation = () => {
     scanLineAnim.setValue(0);
@@ -106,12 +113,7 @@ const ReceiveScreen = () => {
     ).start();
   };
 
-  const startRadarAnimations = () => {
-    rotateAnim.setValue(0);
-    Animated.loop(
-      Animated.timing(rotateAnim, { toValue: 1, duration: 4000, easing: Easing.linear, useNativeDriver: true })
-    ).start();
-  };
+
 
   const codeScanner = useCodeScanner({
     codeTypes: ['qr'],
@@ -120,28 +122,47 @@ const ReceiveScreen = () => {
         if (codes.length > 0 && codes[0].value) {
           try {
             const qr = JSON.parse(codes[0].value);
-            connectToHotspot(qr.ssid, qr.pass, qr.ip);
+            connectToHotspot(qr.ssid, qr.pass, qr.ip, qr.mac);
           } catch (e) { }
         }
     },
   });
 
-  const connectToHotspot = async (ssid: string, password?: string, ip?: string) => {
+  const connectToHotspot = async (ssid: string, password?: string, ip?: string, mac?: string) => {
     setConnectionStatus('connecting');
     setConnectionLog('Connecting to Hotspot...');
     try {
-        if (ssid) {
+      let connectedViaP2P = false;
+      if (mac && mac !== '02:00:00:00:00:00') {
+        try {
+          await WifiP2PManager.connectToMAC(mac);
+          setConnectionLog('P2P Native connected. Fetching network IP...');
+          await new Promise(r => setTimeout(r, 4000));
+          connectedViaP2P = true;
+        } catch (e) {
+          console.log('P2P connect failed, falling back to SSID', e);
+        }
+      } else if (mac === '02:00:00:00:00:00') {
+        console.log('[ReceiveScreen] Cannot use OS-masked MAC address for P2P connection, bypassing direct native P2P.');
+      }
+
+      if (!connectedViaP2P && ssid) {
           await WifiP2PManager.connectToSSID(ssid, password);
           setConnectionLog('Wi-Fi connected. Fetching network IP...');
           await new Promise(r => setTimeout(r, 4000));
+      }
 
-          // Update Zustand store
+      if (ssid) {
+          // Update Zustand store with the sender's IP (target)
           setConnectionDetails({ type: 'hotspot', ssid, ip: ip || '' });
         }
+
+      // Fetch local IP only for debugging/logs, don't overwrite target IP in store
       DeviceInfo.getIpAddress().then((newIp) => {
         setLocalIp(newIp);
-        setConnectionDetails({ type: 'hotspot', ssid, ip: newIp });
-      });
+          console.log('[ReceiveScreen] Local IP:', newIp);
+        }).catch(() => { });
+
         connectToTransferServer(ssid, ip);
     } catch (e) {
         setConnectionStatus('error');
@@ -160,7 +181,8 @@ const ReceiveScreen = () => {
       if (status.type === 'connection' && status.connected) {
         setConnected(true);
         setConnectionStatus('connected');
-        (navigation as any).navigate('FileTransfer', { role: 'receiver', deviceName: ssid || 'Sender', initialFiles: [] });
+        HapticUtil.medium(); // 📳 connection success haptic
+        (navigation as any).replace('FileTransfer', { role: 'receiver', deviceName: ssid || 'Sender', initialFiles: [] });
       }
     };
     TransferClient.start(8888, downloadDir, ip);
@@ -173,7 +195,7 @@ const ReceiveScreen = () => {
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
-      <StatusBar barStyle="light-content" translucent backgroundColor="transparent" />
+      <StatusBar barStyle="light-content" />
 
       {/* Header */}
       <View style={styles.headerWrapper}>
@@ -185,10 +207,18 @@ const ReceiveScreen = () => {
         />
         <SafeAreaView>
           <View style={styles.headerContent}>
-            <TouchableOpacity onPress={() => navigation.goBack()} style={styles.iconButton}>
+            <TouchableOpacity
+              onPress={() => {
+                TransferClient.stop();
+                navigation.goBack();
+              }}
+              style={styles.iconButton}
+            >
               <Icon name="arrow-left" size={24} color="#FFF" />
             </TouchableOpacity>
-            <Text style={[styles.headerTitle, { fontFamily: typography.fontFamily }]}>Receive Files</Text>
+            <Text style={[styles.headerTitle, { fontFamily: typography.fontFamily }]}>
+              {isConnectMode ? 'Connect Device' : 'Receive Files'}
+            </Text>
             <View style={{ width: 40 }} />
           </View>
         </SafeAreaView>
@@ -196,7 +226,6 @@ const ReceiveScreen = () => {
 
       <View style={styles.contentContainer}>
         <View style={[styles.mainCard, { backgroundColor: colors.surface, ...layout.shadow.medium }]}>
-          {activeTab === 'qr' ? (
             <View style={styles.scannerWrapper}>
               {hasPermission && device ? (
                 <View style={[styles.cameraFrame, { borderColor: colors.primary }]}>
@@ -224,101 +253,56 @@ const ReceiveScreen = () => {
               <Text style={[styles.hintText, { color: colors.text, fontFamily: typography.fontFamily }]}>
                 Scan sender's QR code
               </Text>
-            </View>
-          ) : (
-            <View style={styles.radarWrapper}>
-                <View style={styles.radarContainer}>
-                  <View style={[styles.radarCircle, { borderColor: colors.primary, width: 280, height: 280, opacity: 0.1 }]} />
-                  <View style={[styles.radarCircle, { borderColor: colors.primary, width: 200, height: 200, opacity: 0.2 }]} />
-                  <View style={[styles.radarCircle, { borderColor: colors.primary, width: 120, height: 120, opacity: 0.3 }]} />
-                  <Animated.View
-                    style={[
-                      styles.sweep,
-                      { transform: [{ rotate: rotation }] }
-                    ]}
-                  >
-                    <LinearGradient
-                      colors={[colors.primary + '66', 'transparent']}
-                      start={{ x: 0, y: 0.5 }}
-                      end={{ x: 1, y: 0.5 }}
-                      style={styles.sweepGradient}
-                    />
-                  </Animated.View>
-                </View>
-
-                <Text style={[styles.hintText, { color: colors.text, fontFamily: typography.fontFamily, marginBottom: 10 }]}>
-                  Nearby Networks
-                </Text>
-
-                <FlatList 
-                  data={wifiList}
-                  keyExtractor={(item, index) => index.toString()}
-                  style={{ width: '100%', paddingHorizontal: 20 }}
-                  renderItem={({ item }) => (
-                    <TouchableOpacity
-                      style={[styles.wifiItem, { borderBottomColor: colors.border }]}
-                      onPress={() => connectToHotspot(item.SSID)}
-                    >
-                      <View style={[styles.wifiIconBox, { backgroundColor: colors.background }]}>
-                        <Icon name="wifi" size={20} color={colors.primary} />
-                      </View>
-                      <Text style={[styles.wifiText, { color: colors.text, fontFamily: typography.fontFamily }]}>
-                        {item.SSID}
-                      </Text>
-                      <Icon name="chevron-right" size={20} color={colors.subtext} />
-                      </TouchableOpacity>
-                    )}
-                />
-              </View>
-          )}
+          </View>
         </View>
 
-        <View style={[styles.tabsContainer, { backgroundColor: colors.surface, padding: 4, borderRadius: 20 }]}>
-          <TouchableOpacity
-            style={[
-              styles.tab,
-              activeTab === 'qr' && { backgroundColor: colors.primary }
-            ]}
-            onPress={() => setActiveTab('qr')}
-          >
-            <Icon name="qrcode-scan" size={20} color={activeTab === 'qr' ? '#FFF' : colors.subtext} />
-            <Text style={[
-              styles.tabText,
-              {
-                color: activeTab === 'qr' ? '#FFF' : colors.subtext,
-                fontFamily: typography.fontFamily
-              }
-            ]}>QR Scan</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[
-              styles.tab,
-              activeTab === 'nearby' && { backgroundColor: colors.primary }
-            ]}
-            onPress={() => setActiveTab('nearby')}
-          >
-            <Icon name="radar" size={20} color={activeTab === 'nearby' ? '#FFF' : colors.subtext} />
-            <Text style={[
-              styles.tabText,
-              {
-                color: activeTab === 'nearby' ? '#FFF' : colors.subtext,
-                fontFamily: typography.fontFamily
-              }
-            ]}>Nearby</Text>
-          </TouchableOpacity>
         </View>
-      </View>
+
 
       {connectionStatus === 'connecting' && (
         <View style={styles.loadingOverlay}>
           <View style={[styles.loadingCard, { backgroundColor: colors.surface }]}>
-            <ActivityIndicator size="large" color={colors.primary} />
-            <Text style={[styles.loadingTitle, { color: colors.text }]}>Connecting</Text>
+            {/* ── #11 Radar Pulse Animation ──────────────────────── */}
+            <RadarPulse
+              size={160}
+              color={colors.primary}
+              icon="wifi-find"
+              numRings={3}
+            />
+            <Text style={[styles.loadingTitle, { color: colors.text, marginTop: 16 }]}>Connecting...</Text>
             <Text style={[styles.loadingLog, { color: colors.subtext }]}>{connectionLog}</Text>
-            <TouchableOpacity style={[styles.cancelBtn, { backgroundColor: colors.border }]} onPress={() => { TransferClient.stop(); setConnectionStatus('idle'); }}>
-              <Text style={{ color: colors.text }}>Cancel</Text>
+            <TouchableOpacity
+              style={[styles.cancelBtn, { backgroundColor: colors.border, marginTop: 10 }]}
+              onPress={() => { TransferClient.stop(); setConnectionStatus('error'); }}
+            >
+              <Text style={{ color: colors.text, fontWeight: '600' }}>Cancel</Text>
             </TouchableOpacity>
+          </View>
+        </View>
+      )}
+
+      {connectionStatus === 'error' && (
+        <View style={styles.loadingOverlay}>
+          <View style={[styles.loadingCard, { backgroundColor: colors.surface }]}>
+            <Icon name="close-circle-outline" size={48} color={colors.error} />
+            <Text style={[styles.loadingTitle, { color: colors.text }]}>Connection Failed</Text>
+            <Text style={[styles.loadingLog, { color: colors.subtext, marginBottom: 20 }]}>
+              Could not connect to the sender. Please try again or check the QR code.
+            </Text>
+            <View style={{ flexDirection: 'row', gap: 12 }}>
+              <TouchableOpacity
+                style={[styles.cancelBtn, { backgroundColor: colors.border, flex: 1 }]}
+                onPress={() => setConnectionStatus('idle')}
+              >
+                <Text style={{ color: colors.text, fontWeight: '600', textAlign: 'center' }}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={{ backgroundColor: colors.primary, borderRadius: 12, paddingVertical: 10, paddingHorizontal: 20, flex: 1 }}
+                onPress={() => setConnectionStatus('idle')}
+              >
+                <Text style={{ color: '#FFF', fontWeight: '700', textAlign: 'center' }}>Try Again</Text>
+              </TouchableOpacity>
+            </View>
           </View>
         </View>
       )}
