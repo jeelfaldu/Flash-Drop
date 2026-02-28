@@ -16,6 +16,18 @@ import { requestConnectPermissions } from './src/utils/permissionHelper';
 import { ThemeProvider, useTheme } from './src/theme/ThemeContext';
 import { ToastProvider } from './src/components/Toast';
 import { GlobalTransferOverlay } from './src/components/GlobalTransferOverlay';
+import mobileAds, { RewardedAd, RewardedAdEventType, TestIds } from 'react-native-google-mobile-ads';
+
+const rewardedAdUnitId = __DEV__ ? TestIds.REWARDED : 'ca-app-pub-3940256099942544/5224354917';
+const rewarded = RewardedAd.createForAdRequest(rewardedAdUnitId, {
+  requestNonPersonalizedAdsOnly: false,
+});
+
+mobileAds()
+  .initialize()
+  .then(adapterStatuses => {
+    console.log('AdMob initialization complete!', adapterStatuses);
+  });
 
 export const navigationRef = createNavigationContainerRef();
 
@@ -108,6 +120,26 @@ const AppNavigator = () => {
 const App = () => {
   useEffect(() => {
     requestConnectPermissions();
+
+    // Load and show rewarded ad on app startup
+    const unsubscribeLoaded = rewarded.addAdEventListener(RewardedAdEventType.LOADED, () => {
+      rewarded.show();
+    });
+
+    let isLoaded = false;
+    try {
+      isLoaded = rewarded.loaded;
+    } catch (e) { }
+
+    if (isLoaded) {
+      rewarded.show();
+    } else {
+      rewarded.load();
+    }
+
+    return () => {
+      unsubscribeLoaded();
+    };
   }, []);
 
   return (

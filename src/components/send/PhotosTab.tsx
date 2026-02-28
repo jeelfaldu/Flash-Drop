@@ -1,6 +1,9 @@
 import React, { memo, useCallback, useMemo, useRef, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Image, FlatList, Dimensions, PanResponder } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
+import { BannerAd, BannerAdSize, TestIds } from 'react-native-google-mobile-ads';
+
+const adUnitId = __DEV__ ? TestIds.ADAPTIVE_BANNER : 'ca-app-pub-3940256099942544/6300978111';
 
 const { width } = Dimensions.get('window');
 
@@ -142,7 +145,7 @@ export const PhotosTab: React.FC<PhotosTabProps> = ({
     );
   }, [selectedItems, handleSelection, handlePreview, handleLayout, colors, styles]);
 
-  const renderSection = useCallback(({ item: section }: any) => {
+  const renderSection = useCallback(({ item: section, index }: any) => {
     const isAllSelected = section.data.every((p: any) => selectedItems.find(i => i.id === p.id));
     return (
       <View style={styles.dateSection}>
@@ -164,6 +167,17 @@ export const PhotosTab: React.FC<PhotosTabProps> = ({
           maxToRenderPerBatch={12}
           removeClippedSubviews={true}
         />
+        {index % 3 === 2 && (
+          <View style={{ alignItems: 'center', marginVertical: 15 }}>
+            <BannerAd
+              unitId={adUnitId}
+              size={BannerAdSize.ANCHORED_ADAPTIVE_BANNER}
+              requestOptions={{
+                requestNonPersonalizedAdsOnly: false,
+              }}
+            />
+          </View>
+        )}
       </View>
     );
   }, [selectedItems, renderPhotoItem, toggleDateSelection, colors, typography, styles]);

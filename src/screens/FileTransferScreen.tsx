@@ -28,6 +28,12 @@ import { useTransferStore } from '../store';
 import { useToast } from '../components/Toast';
 import HapticUtil from '../utils/HapticUtil';
 import { FileCardSkeleton } from '../components/SkeletonLoader';
+import { InterstitialAd, AdEventType, TestIds } from 'react-native-google-mobile-ads';
+
+const interstitialId = __DEV__ ? TestIds.INTERSTITIAL : 'ca-app-pub-3940256099942544/1033173712';
+const interstitial = InterstitialAd.createForAdRequest(interstitialId, {
+  requestNonPersonalizedAdsOnly: false,
+});
 
 const { width } = Dimensions.get('window');
 
@@ -102,6 +108,7 @@ const FileTransferScreen = () => {
             else TransferClient.stop();
             resetTransfer();
             setTransferring(false); // Ensure state is reset
+            if (interstitial.loaded) interstitial.show();
             (navigation as any).navigate('Home');
           }
         }
@@ -109,6 +116,15 @@ const FileTransferScreen = () => {
     );
     return true;
   };
+
+  // Preload interstitial ad on mount
+  useEffect(() => {
+    const unsubscribe = interstitial.addAdEventListener(AdEventType.LOADED, () => {
+      console.log('Interstitial Ad loaded');
+    });
+    interstitial.load();
+    return unsubscribe;
+  }, []);
 
   // Update Zustand store with role
   useEffect(() => {
@@ -430,6 +446,7 @@ const FileTransferScreen = () => {
             }
             // Reset full transfer state so stale data doesn't leak into next session
             resetTransfer();
+            if (interstitial.loaded) interstitial.show();
             (navigation as any).navigate('Home');
           }
         }

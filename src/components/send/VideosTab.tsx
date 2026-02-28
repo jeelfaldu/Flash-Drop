@@ -1,6 +1,9 @@
 import React from 'react';
 import { View, Text, TouchableOpacity, Image, FlatList } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
+import { BannerAd, BannerAdSize, TestIds } from 'react-native-google-mobile-ads';
+
+const adUnitId = __DEV__ ? TestIds.ADAPTIVE_BANNER : 'ca-app-pub-3940256099942544/6300978111';
 
 interface VideosTabProps {
   videos: any[];
@@ -69,7 +72,7 @@ export const VideosTab: React.FC<VideosTabProps> = ({
       data={sections}
       keyExtractor={item => item.title}
       contentContainerStyle={styles.listContent}
-      renderItem={({ item: section }) => {
+      renderItem={({ item: section, index }) => {
         const isAllSelected = section.data.every((v: any) => selectedItems.find(i => i.id === v.id));
         return (
           <View style={styles.dateSection}>
@@ -86,6 +89,17 @@ export const VideosTab: React.FC<VideosTabProps> = ({
                 {renderVideoItem({ item: video })}
               </React.Fragment>
             ))}
+            {index % 3 === 2 && (
+              <View style={{ alignItems: 'center', marginVertical: 15 }}>
+                <BannerAd
+                  unitId={adUnitId}
+                  size={BannerAdSize.ANCHORED_ADAPTIVE_BANNER}
+                  requestOptions={{
+                    requestNonPersonalizedAdsOnly: false,
+                  }}
+                />
+              </View>
+            )}
           </View>
         );
       }}

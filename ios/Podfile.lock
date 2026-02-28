@@ -8,6 +8,9 @@ PODS:
   - FBLazyVector (0.82.1)
   - fmt (11.0.2)
   - glog (0.3.5)
+  - Google-Mobile-Ads-SDK (12.14.0):
+    - GoogleUserMessagingPlatform (>= 1.1)
+  - GoogleUserMessagingPlatform (3.1.0)
   - hermes-engine (0.82.1):
     - hermes-engine/Pre-built (= 0.82.1)
   - hermes-engine/Pre-built (0.82.1)
@@ -2548,6 +2551,36 @@ PODS:
     - SDWebImageWebPCoder (~> 0.8.4)
   - RNFS (2.20.0):
     - React-Core
+  - RNGoogleMobileAds (16.0.3):
+    - boost
+    - DoubleConversion
+    - fast_float
+    - fmt
+    - glog
+    - Google-Mobile-Ads-SDK (= 12.14.0)
+    - GoogleUserMessagingPlatform (= 3.1.0)
+    - hermes-engine
+    - RCT-Folly
+    - RCT-Folly/Fabric
+    - RCTRequired
+    - RCTTypeSafety
+    - React-Core
+    - React-debug
+    - React-Fabric
+    - React-featureflags
+    - React-graphics
+    - React-ImageManager
+    - React-jsi
+    - React-NativeModulesApple
+    - React-RCTFabric
+    - React-renderercss
+    - React-rendererdebug
+    - React-utils
+    - ReactCodegen
+    - ReactCommon/turbomodule/bridging
+    - ReactCommon/turbomodule/core
+    - SocketRocket
+    - Yoga
   - RNNotifee (9.1.8):
     - React-Core
     - RNNotifee/NotifeeCore (= 9.1.8)
@@ -2827,6 +2860,7 @@ DEPENDENCIES:
   - RNDeviceInfo (from `../node_modules/react-native-device-info`)
   - RNFastImage (from `../node_modules/react-native-fast-image`)
   - RNFS (from `../node_modules/react-native-fs`)
+  - RNGoogleMobileAds (from `../node_modules/react-native-google-mobile-ads`)
   - "RNNotifee (from `../node_modules/@notifee/react-native`)"
   - RNPermissions (from `../node_modules/react-native-permissions`)
   - RNScreens (from `../node_modules/react-native-screens`)
@@ -2840,6 +2874,8 @@ DEPENDENCIES:
 SPEC REPOS:
   trunk:
     - CocoaAsyncSocket
+    - Google-Mobile-Ads-SDK
+    - GoogleUserMessagingPlatform
     - libwebp
     - SDWebImage
     - SDWebImageWebPCoder
@@ -3013,6 +3049,8 @@ EXTERNAL SOURCES:
     :path: "../node_modules/react-native-fast-image"
   RNFS:
     :path: "../node_modules/react-native-fs"
+  RNGoogleMobileAds:
+    :path: "../node_modules/react-native-google-mobile-ads"
   RNNotifee:
     :path: "../node_modules/@notifee/react-native"
   RNPermissions:
@@ -3039,6 +3077,8 @@ SPEC CHECKSUMS:
   FBLazyVector: 0aa6183b9afe3c31fc65b5d1eeef1f3c19b63bfa
   fmt: a40bb5bd0294ea969aaaba240a927bd33d878cdd
   glog: 5683914934d5b6e4240e497e0f4a3b42d1854183
+  Google-Mobile-Ads-SDK: 4534fd2dfcd3f705c5485a6633c5188d03d4eed2
+  GoogleUserMessagingPlatform: befe603da6501006420c206222acd449bba45a9c
   hermes-engine: 273e30e7fb618279934b0b95ffab60ecedb7acf5
   libwebp: 02b23773aedb6ff1fd38cec7a77b81414c6842a8
   RCT-Folly: 846fda9475e61ec7bcbf8a3fe81edfcaeb090669
@@ -3116,6 +3156,7 @@ SPEC CHECKSUMS:
   RNDeviceInfo: 36d7f232bfe7c9b5c494cb7793230424ed32c388
   RNFastImage: 462a183c4b0b6b26fdfd639e1ed6ba37536c3b87
   RNFS: 89de7d7f4c0f6bafa05343c578f61118c8282ed8
+  RNGoogleMobileAds: ea2da81e7951ed0ce97902b01fa80c39b2bb3ff9
   RNNotifee: 5e3b271e8ea7456a36eec994085543c9adca9168
   RNPermissions: 548d29ab527bfd2d909662e97eac8ab5d7c9f667
   RNScreens: c77cc7a5d1fbc23f0725b54e96eec81118453382

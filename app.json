@@ -3,5 +3,9 @@
   "displayName": "Flash-Drop",
   "version": "1.0.0",
   "description": "Lightning fast file sharing for Android/PC",
-  "author": "Flash-Drop Team"
+  "author": "Flash-Drop Team",
+  "react-native-google-mobile-ads": {
+    "android_app_id": "ca-app-pub-3940256099942544~3347511713",
+    "ios_app_id": "ca-app-pub-3940256099942544~1458002511"
+  }
 }

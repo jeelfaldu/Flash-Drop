@@ -19,6 +19,9 @@ import LinearGradient from 'react-native-linear-gradient';
 import { useTheme } from '../theme/ThemeContext';
 import { useTransferStore, useMediaStore, useUIStore, useConnectionStore } from '../store';
 import TransferServer from '../utils/TransferServer';
+import { BannerAd, BannerAdSize, TestIds } from 'react-native-google-mobile-ads';
+
+const adUnitId = __DEV__ ? TestIds.ADAPTIVE_BANNER : 'ca-app-pub-3940256099942544/6300978111';
 
 import { PhotosTab } from '../components/send/PhotosTab';
 import { VideosTab } from '../components/send/VideosTab';
@@ -241,6 +244,16 @@ const SendScreen = ({ navigation, route }: any) => {
                 </TouchableOpacity>
           </View>
         </SafeAreaView>
+      </View>
+
+      <View style={{ alignItems: 'center', marginTop: 10, marginBottom: 5 }}>
+        <BannerAd
+          unitId={adUnitId}
+          size={BannerAdSize.ANCHORED_ADAPTIVE_BANNER}
+          requestOptions={{
+            requestNonPersonalizedAdsOnly: false,
+          }}
+        />
       </View>
 
       {isLoading ? (
