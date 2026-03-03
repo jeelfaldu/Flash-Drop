@@ -16,10 +16,11 @@ import { requestConnectPermissions } from './src/utils/permissionHelper';
 import { ThemeProvider, useTheme } from './src/theme/ThemeContext';
 import { ToastProvider } from './src/components/Toast';
 import { GlobalTransferOverlay } from './src/components/GlobalTransferOverlay';
-import mobileAds, { RewardedAd, RewardedAdEventType, TestIds } from 'react-native-google-mobile-ads';
+import mobileAds, { InterstitialAd, AdEventType, TestIds } from 'react-native-google-mobile-ads';
+import { ProdIDs, DisplayAds } from './src/utils/Constant';
 
-const rewardedAdUnitId = __DEV__ ? TestIds.REWARDED : 'ca-app-pub-3940256099942544/5224354917';
-const rewarded = RewardedAd.createForAdRequest(rewardedAdUnitId, {
+const interstitialAdUnitId = __DEV__ ? ProdIDs.INTERSTITIAL : ProdIDs.INTERSTITIAL;
+const interstitial = InterstitialAd.createForAdRequest(interstitialAdUnitId, {
   requestNonPersonalizedAdsOnly: false,
 });
 
@@ -123,24 +124,40 @@ const App = () => {
   useEffect(() => {
     requestConnectPermissions();
 
-    // Load and show rewarded ad on app startup
-    const unsubscribeLoaded = rewarded.addAdEventListener(RewardedAdEventType.LOADED, () => {
-      rewarded.show();
-    });
+    // Check if user is NEW before showing ads
+    const checkUserAndShowAd = async () => {
+      const hasSeenOnboarding = await AsyncStorage.getItem('hasSeenOnboarding');
+      if (hasSeenOnboarding !== 'true') {
+        console.log('New user detected, skipping initial ad');
+        return;
+      }
 
-    let isLoaded = false;
-    try {
-      isLoaded = rewarded.loaded;
-    } catch (e) { }
+      if (!DisplayAds) return;
 
-    if (isLoaded) {
-      rewarded.show();
-    } else {
-      rewarded.load();
-    }
+      // Load and show interstitial ad on app startup
+      const unsubscribeLoaded = interstitial.addAdEventListener(AdEventType.LOADED, () => {
+        interstitial.show();
+      });
+
+      let isLoaded = false;
+      try {
+        isLoaded = interstitial.loaded;
+      } catch (e) { }
+
+      if (isLoaded) {
+        interstitial.show();
+      } else {
+        interstitial.load();
+      }
+
+      return unsubscribeLoaded;
+    };
+
+    let unsub: (() => void) | undefined;
+    checkUserAndShowAd().then(u => unsub = u);
 
     return () => {
-      unsubscribeLoaded();
+      if (unsub) unsub();
     };
   }, []);
 
@@ -150,7 +167,7 @@ const App = () => {
         <ToastProvider>
           <View style={{ flex: 1 }}>
             <AppNavigator />
-            <GlobalTransferOverlay />
+            {/* <GlobalTransferOverlay /> */}
           </View>
         </ToastProvider>
       </ThemeProvider>

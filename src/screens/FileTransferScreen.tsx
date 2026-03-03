@@ -29,8 +29,9 @@ import { useToast } from '../components/Toast';
 import HapticUtil from '../utils/HapticUtil';
 import { FileCardSkeleton } from '../components/SkeletonLoader';
 import { InterstitialAd, AdEventType, TestIds } from 'react-native-google-mobile-ads';
+import { DisplayAds, ProdIDs } from '../utils/Constant';
 
-const interstitialId = __DEV__ ? TestIds.INTERSTITIAL : 'ca-app-pub-3940256099942544/1033173712';
+const interstitialId = __DEV__ ? ProdIDs.INTERSTITIAL : ProdIDs.INTERSTITIAL;
 const interstitial = InterstitialAd.createForAdRequest(interstitialId, {
   requestNonPersonalizedAdsOnly: false,
 });
@@ -108,7 +109,6 @@ const FileTransferScreen = () => {
             else TransferClient.stop();
             resetTransfer();
             setTransferring(false); // Ensure state is reset
-            if (interstitial.loaded) interstitial.show();
             (navigation as any).navigate('Home');
           }
         }
@@ -117,13 +117,32 @@ const FileTransferScreen = () => {
     return true;
   };
 
-  // Preload interstitial ad on mount
+  // Preload and show interstitial ad on mount (transfer start)
   useEffect(() => {
-    const unsubscribe = interstitial.addAdEventListener(AdEventType.LOADED, () => {
-      console.log('Interstitial Ad loaded');
-    });
-    interstitial.load();
-    return unsubscribe;
+    const showAdOnStart = async () => {
+      if (!DisplayAds) return;
+
+      const unsubscribe = interstitial.addAdEventListener(AdEventType.LOADED, () => {
+        console.log('Interstitial Ad loaded, showing for transfer start');
+        interstitial.show();
+      });
+
+      // If already loaded, show it
+      if (interstitial.loaded) {
+        interstitial.show();
+      } else {
+        interstitial.load();
+      }
+
+      return unsubscribe;
+    };
+
+    let unsub: (() => void) | undefined;
+    showAdOnStart().then(u => unsub = u);
+
+    return () => {
+      if (unsub) unsub();
+    };
   }, []);
 
   // Update Zustand store with role
@@ -446,7 +465,6 @@ const FileTransferScreen = () => {
             }
             // Reset full transfer state so stale data doesn't leak into next session
             resetTransfer();
-            if (interstitial.loaded) interstitial.show();
             (navigation as any).navigate('Home');
           }
         }

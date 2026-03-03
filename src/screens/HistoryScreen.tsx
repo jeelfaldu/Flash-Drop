@@ -7,8 +7,9 @@ import RNFS from 'react-native-fs';
 import { useTheme } from '../theme/ThemeContext';
 import { useHistoryStore } from '../store';
 import { BannerAd, BannerAdSize, TestIds } from 'react-native-google-mobile-ads';
+import { DisplayAds, ProdIDs } from '../utils/Constant';
 
-const adUnitId = __DEV__ ? TestIds.ADAPTIVE_BANNER : 'ca-app-pub-3940256099942544/6300978111';
+const adUnitId = __DEV__ ? ProdIDs.ADAPTIVE_BANNER : ProdIDs.ADAPTIVE_BANNER;
 
 const HistoryScreen = ({ navigation }: any) => {
   const { colors, typography, spacing, layout, isDark } = useTheme();
@@ -197,13 +198,15 @@ const HistoryScreen = ({ navigation }: any) => {
 
       <View style={styles.content}>
         <View style={{ alignItems: 'center', marginVertical: 10 }}>
-          <BannerAd
-            unitId={adUnitId}
-            size={BannerAdSize.ANCHORED_ADAPTIVE_BANNER}
-            requestOptions={{
-              requestNonPersonalizedAdsOnly: false,
-            }}
-          />
+          {DisplayAds && (
+            <BannerAd
+              unitId={adUnitId}
+              size={BannerAdSize.ANCHORED_ADAPTIVE_BANNER}
+              requestOptions={{
+                requestNonPersonalizedAdsOnly: false,
+              }}
+            />
+          )}
         </View>
         <FlatList
           data={filteredHistory()}

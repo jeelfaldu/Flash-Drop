@@ -20,8 +20,9 @@ import { useTheme } from '../theme/ThemeContext';
 import { useTransferStore, useMediaStore, useUIStore, useConnectionStore } from '../store';
 import TransferServer from '../utils/TransferServer';
 import { BannerAd, BannerAdSize, TestIds } from 'react-native-google-mobile-ads';
+import { DisplayAds, ProdIDs } from '../utils/Constant';
 
-const adUnitId = __DEV__ ? TestIds.ADAPTIVE_BANNER : 'ca-app-pub-3940256099942544/6300978111';
+const adUnitId = __DEV__ ? ProdIDs.ADAPTIVE_BANNER : ProdIDs.ADAPTIVE_BANNER;
 
 import { PhotosTab } from '../components/send/PhotosTab';
 import { VideosTab } from '../components/send/VideosTab';
@@ -247,13 +248,15 @@ const SendScreen = ({ navigation, route }: any) => {
       </View>
 
       <View style={{ alignItems: 'center', marginTop: 10, marginBottom: 5 }}>
-        <BannerAd
-          unitId={adUnitId}
-          size={BannerAdSize.ANCHORED_ADAPTIVE_BANNER}
-          requestOptions={{
-            requestNonPersonalizedAdsOnly: false,
-          }}
-        />
+        {DisplayAds && (
+          <BannerAd
+            unitId={adUnitId}
+            size={BannerAdSize.ANCHORED_ADAPTIVE_BANNER}
+            requestOptions={{
+              requestNonPersonalizedAdsOnly: false,
+            }}
+          />
+        )}
       </View>
 
       {isLoading ? (

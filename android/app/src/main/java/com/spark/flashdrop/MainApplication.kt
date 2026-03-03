@@ -1,4 +1,4 @@
-package com.flashdrop
+package com.spark.flashdrop
 
 import android.app.Application
 import com.facebook.react.PackageList

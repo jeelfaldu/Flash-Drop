@@ -7,8 +7,9 @@ import { useTheme } from '../theme/ThemeContext';
 import { useConnectionStore } from '../store';
 import { requestConnectPermissions } from '../utils/permissionHelper';
 import { BannerAd, BannerAdSize, TestIds } from 'react-native-google-mobile-ads';
+import { DisplayAds, ProdIDs } from '../utils/Constant';
 
-const adUnitId = __DEV__ ? TestIds.ADAPTIVE_BANNER : 'ca-app-pub-3940256099942544/6300978111';
+const adUnitId = __DEV__ ? ProdIDs.ADAPTIVE_BANNER : ProdIDs.ADAPTIVE_BANNER;
 
 const { width } = Dimensions.get('window');
 
@@ -246,13 +247,15 @@ const HomeScreen = ({ navigation }: any) => {
           </View>
 
           <View style={{ alignItems: 'center', marginTop: 24 }}>
-            <BannerAd
-              unitId={adUnitId}
-              size={BannerAdSize.ANCHORED_ADAPTIVE_BANNER}
-              requestOptions={{
-                requestNonPersonalizedAdsOnly: false,
-              }}
-            />
+            {DisplayAds && (
+              <BannerAd
+                unitId={adUnitId}
+                size={BannerAdSize.ANCHORED_ADAPTIVE_BANNER}
+                requestOptions={{
+                  requestNonPersonalizedAdsOnly: false,
+                }}
+              />
+            )}
           </View>
 
           <View style={styles.listContainer}>

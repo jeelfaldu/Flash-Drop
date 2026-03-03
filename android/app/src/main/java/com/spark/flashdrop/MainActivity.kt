@@ -1,4 +1,4 @@
-package com.flashdrop
+package com.spark.flashdrop
 
 import com.facebook.react.ReactActivity
 import com.facebook.react.ReactActivityDelegate
