@@ -22,6 +22,7 @@ import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
 import LinearGradient from 'react-native-linear-gradient';
 import DeviceInfo from 'react-native-device-info';
 import TransferClient, { TransferStatus } from '../utils/TransferClient';
+import TransferServer from '../utils/TransferServer';
 import WifiP2PManager from '../utils/WifiP2PManager';
 import RNFS from 'react-native-fs';
 import { useNavigation } from '@react-navigation/native';
@@ -172,10 +173,14 @@ const ReceiveScreen = ({ route }: any) => {
   };
 
   const connectToTransferServer = (ssid?: string, ip?: string) => {
-    // Use ExternalDirectoryPath (Android/data/com.package/files) to avoid Scoped Storage issues on Android 11+
+    // Save to public Downloads folder so users can find their files easily in their File Manager
     const downloadDir = Platform.OS === 'android'
-      ? `${RNFS.ExternalDirectoryPath}/FlashDrop`
+      ? `${RNFS.DownloadDirectoryPath}/FlashDrop`
       : `${RNFS.DocumentDirectoryPath}/FlashDrop`;
+
+    // ── Xender-style: Start receiver's own server so sender can send back ──
+    // Files list starts empty; receiver adds files via "Send More" in FileTransferScreen.
+    TransferServer.start(8888, []);
 
     TransferClient.onStatus = (status: TransferStatus) => {
       if (status.type === 'log') setConnectionLog(status.message || '');
@@ -183,6 +188,11 @@ const ReceiveScreen = ({ route }: any) => {
         setConnected(true);
         setConnectionStatus('connected');
         HapticUtil.medium(); // 📳 connection success haptic
+
+        // ── Xender-style: tell sender we are ready to receive files back ──
+        // (Sender will use the remote IP from the socket, so we only send our port)
+        TransferClient.registerWithPeer(8888).catch(() => { });
+
         (navigation as any).replace('FileTransfer', { role: 'receiver', deviceName: ssid || 'Sender', initialFiles: [] });
       }
     };

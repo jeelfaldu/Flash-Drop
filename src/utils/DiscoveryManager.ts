@@ -291,14 +291,15 @@ class DiscoveryManager {
     const candidates: string[] = [];
 
     const add = (ip: string) => {
-      if (ip && ip !== '0.0.0.0' && ip !== '127.0.0.1' && !seen.has(ip)) {
+      // ── CRITICAL FIX: Exclude myIp so we don't connect to our own Xender-style server ──
+      if (ip && ip !== '0.0.0.0' && ip !== '127.0.0.1' && ip !== myIp && !seen.has(ip)) {
         seen.add(ip);
         candidates.push(ip);
       }
     };
 
     // ① Common Android Wi-Fi Direct / Hotspot gateways
-    ['192.168.49.1', '192.168.43.1', '192.168.45.1', '10.0.0.1'].forEach(add);
+    ['192.168.49.1', '192.168.43.1', '192.168.45.1', '10.0.0.1', '192.168.251.1'].forEach(add);
 
     // ② Derive subnet from own IP
     let myIp = '';

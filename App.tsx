@@ -122,27 +122,25 @@ const AppNavigator = () => {
 
 const App = () => {
   useEffect(() => {
-    requestConnectPermissions();
-
-    // Check if user is NEW before showing ads
-    const checkUserAndShowAd = async () => {
+    // ── Only request permissions for RETURNING users ──
+    // New users: permissions will be asked AFTER onboarding completes
+    const initApp = async () => {
       const hasSeenOnboarding = await AsyncStorage.getItem('hasSeenOnboarding');
-      if (hasSeenOnboarding !== 'true') {
-        console.log('New user detected, skipping initial ad');
-        return;
+      const isReturningUser = hasSeenOnboarding === 'true';
+
+      if (isReturningUser) {
+        requestConnectPermissions();
       }
 
-      if (!DisplayAds) return;
+      // Show ad only for returning users
+      if (!isReturningUser || !DisplayAds) return;
 
-      // Load and show interstitial ad on app startup
       const unsubscribeLoaded = interstitial.addAdEventListener(AdEventType.LOADED, () => {
         interstitial.show();
       });
 
       let isLoaded = false;
-      try {
-        isLoaded = interstitial.loaded;
-      } catch (e) { }
+      try { isLoaded = interstitial.loaded; } catch (e) { }
 
       if (isLoaded) {
         interstitial.show();
@@ -154,7 +152,7 @@ const App = () => {
     };
 
     let unsub: (() => void) | undefined;
-    checkUserAndShowAd().then(u => unsub = u);
+    initApp().then(u => unsub = u);
 
     return () => {
       if (unsub) unsub();

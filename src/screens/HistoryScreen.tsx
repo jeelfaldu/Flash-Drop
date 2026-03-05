@@ -93,7 +93,7 @@ const HistoryScreen = ({ navigation }: any) => {
             style={styles.imagePreview}
             source={{
               uri: Platform.OS === 'android'
-                ? `file://${RNFS.ExternalDirectoryPath}/FlashDrop/${item.fileName}`
+                ? `file://${RNFS.DownloadDirectoryPath}/FlashDrop/${item.fileName}`
                 : `file://${RNFS.DocumentDirectoryPath}/FlashDrop/${item.fileName}`,
               priority: FastImage.priority.normal,
             }}

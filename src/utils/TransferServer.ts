@@ -23,6 +23,10 @@ export class TransferServer {
   statusCallback?: (status: ServerStatus) => void;
   private connectedClients = new Set<string>();
   private currentPort: number = 8888;
+  // ── Xender-style bidirectional: peer device info ──
+  private peerIp: string | null = null;
+  private peerServerPort: number = 8888;
+  private peerRegisteredCb?: (ip: string, port: number) => void;
     
   start(port = 8888, files: any[], onStatus?: (status: ServerStatus) => void) {
     this.currentPort = port;
@@ -259,6 +263,30 @@ export class TransferServer {
                   return;
                 }
               }
+
+            // ── Peer Registration: GET /api/register (Xender-style) ──────────
+            // Receiver calls this after connecting so sender knows receiver's IP
+            if (msg.startsWith('GET /api/register')) {
+              try {
+                const urlParts = msg.split(' ')[1] || ''; // /api/register?port=...
+                const matchPort = urlParts.match(/port=([0-9]+)/);
+
+                // CRITICAL FIX: Always use socket.remoteAddress to get the true, reachable IP of the receiver!
+                // Do not rely on DeviceInfo.getIpAddress() from the receiver because it might report a cellular IP.
+                this.peerIp = socket.remoteAddress || null;
+                this.peerServerPort = matchPort ? parseInt(matchPort[1], 10) : 8888;
+
+                console.log(`[TransferServer] ✅ Peer registered: ${this.peerIp}:${this.peerServerPort}`);
+                if (this.peerRegisteredCb && this.peerIp) {
+                  this.peerRegisteredCb(this.peerIp, this.peerServerPort);
+                }
+              } catch (e) {
+                console.warn('[TransferServer] /api/register parse error:', e);
+              }
+              const regRes = 'HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK';
+              socket.write(regRes, 'utf8', () => socket.end());
+              return;
+            }
 
               // Handle HTTP Request (Browser)
               if (msg.startsWith('GET') || msg.includes('HTTP/1.1')) {
@@ -731,13 +759,26 @@ export class TransferServer {
             this.server = null;
         }
       this.connectedClients.clear();
+      // Reset peer info on disconnect
+      this.peerIp = null;
+      this.peerServerPort = 8888;
+      this.peerRegisteredCb = undefined;
     // ── Unpublish mDNS so stale services don't linger ──
     DiscoveryManager.stopPublishing();
   }
 
   getPort() {
     return this.currentPort;
-    }
+  }
+
+  // ── Xender-style: register callback for when peer connects back ──
+  onPeerRegistered(cb?: (ip: string, port: number) => void) {
+    this.peerRegisteredCb = cb;
+  }
+
+  getPeerInfo(): { ip: string | null; port: number } {
+    return { ip: this.peerIp, port: this.peerServerPort };
+  }
 }
 
 const TransferServerInstance = new TransferServer();

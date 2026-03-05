@@ -13,6 +13,7 @@ import LinearGradient from 'react-native-linear-gradient';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useTheme } from '../theme/ThemeContext';
+import { requestConnectPermissions } from '../utils/permissionHelper';
 
 const { width, height } = Dimensions.get('window');
 
@@ -68,6 +69,9 @@ const OnboardingScreen = ({ navigation }: any) => {
 
   const handleFinish = async () => {
     await AsyncStorage.setItem('hasSeenOnboarding', 'true');
+    // ── Request permissions AFTER onboarding, not before ──
+    // This gives context: user already saw what the app does
+    requestConnectPermissions();
     navigation.replace('Home');
   };
 

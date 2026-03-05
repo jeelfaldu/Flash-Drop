@@ -28,7 +28,7 @@ import { useTransferStore } from '../store';
 import { useToast } from '../components/Toast';
 import HapticUtil from '../utils/HapticUtil';
 import { FileCardSkeleton } from '../components/SkeletonLoader';
-import { InterstitialAd, AdEventType, TestIds } from 'react-native-google-mobile-ads';
+import { InterstitialAd, AdEventType, TestIds, BannerAd, BannerAdSize } from 'react-native-google-mobile-ads';
 import { DisplayAds, ProdIDs } from '../utils/Constant';
 
 const interstitialId = __DEV__ ? ProdIDs.INTERSTITIAL : ProdIDs.INTERSTITIAL;
@@ -105,8 +105,9 @@ const FileTransferScreen = () => {
           text: "Exit",
           style: "destructive",
           onPress: () => {
-            if (role === 'sender') TransferServer.stop();
-            else TransferClient.stop();
+            // Xender-style: stop both on any role
+            TransferServer.stop();
+            TransferClient.stop();
             resetTransfer();
             setTransferring(false); // Ensure state is reset
             (navigation as any).navigate('Home');
@@ -197,20 +198,20 @@ const FileTransferScreen = () => {
 
     // Subscribe to progress updates
     if (role === 'sender') {
+      // Sender: track outgoing files via own server
       TransferServer.statusCallback = (status) => {
         if (status.type === 'progress' && status.fileProgress) {
           updateFileProgress(status.fileProgress.name, status.fileProgress.percent, status.fileProgress.sent);
         }
       };
     } else {
-      // Receiver: Hook into TransferClient which is already started in ReceiveScreen
+      // Receiver: track downloads from sender
       TransferClient.onStatus = (status: TransferStatus) => {
         if (status.type === 'progress' && status.fileProgress) {
           updateFileProgress(status.fileProgress.name, status.fileProgress.percent, status.fileProgress.received);
         }
 
         if (status.files) {
-        // Update metadata
           setFiles((prev) => {
             const updated = { ...prev };
             let added = false;
@@ -228,11 +229,29 @@ const FileTransferScreen = () => {
                 added = true;
               }
             });
-
             if (added) {
               const allFiles = Object.values(updated) as FileItem[];
               const grandTotal = allFiles.reduce((acc: number, f: FileItem) => acc + (f.size || 0), 0);
               setStats((s: any) => ({ ...s, totalSize: grandTotal }));
+            }
+            return updated;
+          });
+        }
+      };
+
+      // ── Xender-style: Receiver also tracks uploads from own server ──
+      // When sender downloads from receiver's server, show progress on receiver's screen
+      TransferServer.statusCallback = (status) => {
+        if (status.type === 'progress' && status.fileProgress) {
+          const { name, percent, sent } = status.fileProgress;
+          setFiles((prev) => {
+            const updated = { ...prev };
+            if (updated[name]) {
+              updated[name] = {
+                ...updated[name],
+                progress: percent / 100,
+                status: percent === 100 ? ('completed' as const) : ('uploading' as any),
+              };
             }
             return updated;
           });
@@ -246,6 +265,76 @@ const FileTransferScreen = () => {
       // continue updating even if the user navigates to the Home screen.
     };
   }, [role, deviceName]); // Re-subscribe if role or device name unexpectedly changes
+
+  // ── Xender-style: Sender listens for peer registration ──────────────────────────
+  // When receiver registers, sender starts a reverse TransferClient
+  // to poll receiver's server and download files receiver wants to send.
+  useEffect(() => {
+    if (role !== 'sender') return;
+
+    const saveDir = Platform.OS === 'android'
+      ? `${RNFS.DownloadDirectoryPath}/FlashDrop`
+      : `${RNFS.DocumentDirectoryPath}/FlashDrop`;
+
+    TransferServer.onPeerRegistered((peerIp, peerPort) => {
+      console.log(`[FileTransfer] 🔄 Peer registered: ${peerIp}:${peerPort}. Starting reverse TransferClient...`);
+
+      // Wire up reverse-direction progress: files coming FROM receiver TO sender
+      TransferClient.onStatus = (status: TransferStatus) => {
+        if (status.type === 'progress' && status.fileProgress) {
+          // Receiver is sending us files — show in sender's file list
+          const { name, percent, received } = status.fileProgress;
+          setFiles((prev) => {
+            const updated = { ...prev };
+            if (updated[name]) {
+              updated[name] = {
+                ...updated[name],
+                progress: percent / 100,
+                status: percent === 100 ? ('completed' as const) : ('downloading' as any),
+              };
+            }
+            return updated;
+          });
+        }
+
+        if (status.files) {
+          // New files available on receiver's server — add to list
+          setFiles((prev) => {
+            const updated = { ...prev };
+            let added = false;
+            (status.files as any[]).forEach((f: any) => {
+              if (!updated[f.name]) {
+                updated[f.name] = {
+                  id: f.name,
+                  uri: '',
+                  name: f.name,
+                  size: f.size,
+                  progress: 0,
+                  status: 'pending' as const,
+                  type: f.type,
+                };
+                added = true;
+              }
+            });
+            if (added) {
+              const allFiles = Object.values(updated) as FileItem[];
+              const grandTotal = allFiles.reduce((acc: number, f: FileItem) => acc + (f.size || 0), 0);
+              setStats((s: any) => ({ ...s, totalSize: grandTotal }));
+            }
+            return updated;
+          });
+        }
+      };
+
+      // Start polling receiver's server for files they want to send
+      TransferClient.start(peerPort, saveDir, peerIp);
+    });
+
+    // Cleanup: clear callback on unmount
+    return () => {
+      TransferServer.onPeerRegistered(undefined);
+    };
+  }, [role]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const updateFileProgress = (name: string, percent: number, currentSize: number) => {
     setFiles((prev) => {
@@ -418,11 +507,9 @@ const FileTransferScreen = () => {
           text: "Yes, Stop",
           style: "destructive",
           onPress: () => {
-            if (role === 'sender') {
-              TransferServer.stop();
-            } else {
-              TransferClient.stop();
-            }
+            // ── Xender-style: both devices run Server + Client, stop both ──
+            TransferServer.stop();
+            TransferClient.stop();
             setTransferring(false);
             navigation.goBack();
           }
@@ -458,11 +545,9 @@ const FileTransferScreen = () => {
           text: "Exit",
           style: "destructive",
           onPress: () => {
-            if (role === 'sender') {
-              TransferServer.stop();
-            } else {
-              TransferClient.stop();
-            }
+            // ── Xender-style: stop both server and client on both devices ──
+            TransferServer.stop();
+            TransferClient.stop();
             // Reset full transfer state so stale data doesn't leak into next session
             resetTransfer();
             (navigation as any).navigate('Home');
@@ -475,7 +560,7 @@ const FileTransferScreen = () => {
   const handleOpenFile = async (item: FileItem) => {
     if (role === 'receiver' && item.status === 'completed') {
       const path = Platform.OS === 'android'
-        ? `${RNFS.ExternalDirectoryPath}/FlashDrop/${item.name}`
+        ? `${RNFS.DownloadDirectoryPath}/FlashDrop/${item.name}`
         : `${RNFS.DocumentDirectoryPath}/FlashDrop/${item.name}`;
 
       try {
@@ -511,7 +596,7 @@ const FileTransferScreen = () => {
     }
     // Receiver side — reconstruct path from save directory
     const saveDir = Platform.OS === 'android'
-      ? `${RNFS.ExternalDirectoryPath}/FlashDrop`
+      ? `${RNFS.DownloadDirectoryPath}/FlashDrop`
       : `${RNFS.DocumentDirectoryPath}/FlashDrop`;
     if (item.status === 'completed') {
       return `file://${saveDir}/${item.name}`;
@@ -592,7 +677,7 @@ const FileTransferScreen = () => {
               </View>
             )}
             {item.status === 'transferring' && (
-              <View style={[StyleSheet.absoluteFillObject, { backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center', borderRadius: 12 }]}>
+              <View style={[StyleSheet.absoluteFillObject, { backgroundColor: 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center', borderRadius: 14 }]}>
                 <Text style={{ color: '#FFF', fontWeight: '800', fontSize: 13 }}>
                   {Math.round(item.progress * 100)}%
                 </Text>
@@ -600,39 +685,54 @@ const FileTransferScreen = () => {
             )}
           </View>
         ) : (
-            <View style={[styles.iconContainer, { backgroundColor: getIconColor(item.type) + '15', borderWidth: 1, borderColor: getIconColor(item.type) + '30' }]}>
-              <Icon name={getIconForType(item.type)} size={28} color={getIconColor(item.type)} />
+            <View style={[styles.iconContainer, {
+              backgroundColor: getIconColor(item.type) + '18',
+              borderWidth: 1.5,
+              borderColor: getIconColor(item.type) + '35',
+              shadowColor: getIconColor(item.type),
+              shadowOpacity: item.status === 'transferring' ? 0.3 : 0,
+              shadowRadius: 8,
+              shadowOffset: { width: 0, height: 0 },
+              elevation: item.status === 'transferring' ? 4 : 0,
+            }]}>
+              <Icon name={getIconForType(item.type)} size={26} color={getIconColor(item.type)} />
             </View>
         )}
         <View style={styles.fileDetails}>
           <View style={styles.fileHeader}>
-            <Text style={[styles.fileName, { color: colors.text, fontFamily: typography.fontFamily }]} numberOfLines={1}>
-              {item.name}
-              <Text style={[styles.fileSize, { color: colors.subtext }]}> ({formatSize(item.size)})</Text>
-            </Text>
+            <View style={{ flex: 1, marginRight: 10 }}>
+              <Text style={[styles.fileName, { color: item.status === 'completed' ? (colors.subtext) : colors.text, fontFamily: typography.fontFamily }]} numberOfLines={1}>
+                {item.name}
+              </Text>
+              <Text style={[styles.fileSize, { color: colors.subtext }]}>{formatSize(item.size)}</Text>
+            </View>
             {item.status === 'completed' ? (
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                <Icon name="check-circle" size={20} color={colors.success} />
+                <View style={[styles.statusCheckBadge, { backgroundColor: colors.success }]}>
+                  <Icon name="check" size={12} color="#FFF" />
+                </View>
                 {role === 'receiver' && (
-                  <TouchableOpacity onPress={() => handleOpenFile(item)}>
-                    <Text style={{ color: colors.primary, fontSize: 12, fontWeight: '700' }}>OPEN</Text>
+                  <TouchableOpacity onPress={() => handleOpenFile(item)} style={[styles.openBtn, { borderColor: colors.primary + '60', backgroundColor: colors.primary + '10' }]}>
+                    <Text style={{ color: colors.primary, fontSize: 11, fontWeight: '700', letterSpacing: 0.5 }}>OPEN</Text>
                   </TouchableOpacity>
                 )}
               </View>
             ) : (
                 item.status === 'transferring' ? (
-                  <Text style={{ fontSize: 12, color: colors.primary, fontWeight: 'bold' }}>
+                  <Text style={{ fontSize: 13, color: colors.primary, fontWeight: '800', fontVariant: ['tabular-nums'] }}>
                     {Math.round(item.progress * 100)}%
                   </Text>
                 ) : (
-                  <Icon name="clock-outline" size={20} color={colors.subtext} />
-                )
+                    <View style={[styles.pendingBadge, { borderColor: colors.border, backgroundColor: colors.border + '60' }]}>
+                      <Icon name="clock-outline" size={13} color={colors.subtext} />
+                    </View>
+                  )
             )}
           </View>
-          <View style={[styles.progressContainer, { backgroundColor: colors.border }]}>
+          <View style={[styles.progressContainer, { backgroundColor: colors.border + '80' }]}>
             <View style={styles.progressBarBg}>
               <LinearGradient
-                colors={colors.gradient}
+                colors={item.status === 'completed' ? [colors.success, colors.success + 'CC'] : colors.gradient}
                 start={{ x: 0, y: 0 }}
                 end={{ x: 1, y: 0 }}
                 style={[styles.progressBarFill, { width: `${item.progress * 100}%` }]}
@@ -674,22 +774,34 @@ const FileTransferScreen = () => {
             start={{ x: 0, y: 0 }}
             end={{ x: 1, y: 1 }}
           />
+          {/* Decorative glow circles */}
+          <View style={styles.headerGlowTop} />
+          <View style={styles.headerGlowBottom} />
           <SafeAreaView>
             <View style={styles.headerContent}>
               <TouchableOpacity
                 onPress={handleBack}
                 style={styles.iconButton}
               >
-                <Icon name="arrow-left" size={24} color="#FFF" />
+                <Icon name="arrow-left" size={22} color="#FFF" />
               </TouchableOpacity>
 
-              <View style={{ flex: 1, marginLeft: 16 }}>
-                <Text style={[styles.headerTitle, { fontFamily: typography.fontFamily }]}>
-                  {role === 'sender' ? 'Sending...' : 'Receiving...'}
-                </Text>
-                <Text style={[styles.headerSubtitle, { color: 'rgba(255,255,255,0.7)', fontFamily: typography.fontFamily }]}>
-                  {role === 'sender' ? 'To' : 'From'} {deviceName || 'Device'}
-                </Text>
+              <View style={{ flex: 1, marginLeft: 14 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                  <Text style={[styles.headerTitle, { fontFamily: typography.fontFamily }]}>
+                    {role === 'sender' ? 'Sending' : 'Receiving'}
+                  </Text>
+                  {/* Live pulse dot */}
+                  <View style={styles.liveDot} />
+                </View>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 3 }}>
+                  <View style={styles.deviceBadge}>
+                    <Icon name="cellphone" size={11} color="rgba(255,255,255,0.7)" />
+                  </View>
+                  <Text style={[styles.headerSubtitle, { color: 'rgba(255,255,255,0.7)', fontFamily: typography.fontFamily }]}>
+                    {role === 'sender' ? 'To' : 'From'} {deviceName || 'Device'}
+                  </Text>
+                </View>
               </View>
               {/* —— Connection Quality: animated bars + speed text —— */}
               <ConnectionQualityBars />
@@ -706,15 +818,17 @@ const FileTransferScreen = () => {
               if (done.length === 0) return null;
               const doneBytes = done.reduce((s, f) => s + f.size, 0);
               return (
-                <View style={[styles.completedBanner, { backgroundColor: colors.success + '12', borderBottomColor: colors.success + '25' }]}>
+                <View style={[styles.completedBanner, { backgroundColor: colors.success + '12', borderBottomColor: colors.success + '20' }]}>
                   <View style={[styles.completedDot, { backgroundColor: colors.success }]} />
                   <Text style={[styles.completedBannerText, { color: colors.success, fontFamily: typography.fontFamily }]}>
                     {done.length} of {all.length} completed
                   </Text>
-                  <Text style={[styles.completedBannerSize, { color: colors.success + 'CC', fontFamily: typography.fontFamily }]}>
-                    • {formatSize(doneBytes)}
+                  <Text style={[styles.completedBannerSize, { color: colors.success + 'BB', fontFamily: typography.fontFamily }]}>
+                    · {formatSize(doneBytes)}
                   </Text>
-                  <Icon name="check-circle" size={16} color={colors.success} style={{ marginLeft: 'auto' }} />
+                  <View style={[styles.completedCheckBadge, { backgroundColor: colors.success }]}>
+                    <Icon name="check" size={10} color="#FFF" />
+                  </View>
                 </View>
               );
             })()}
@@ -730,61 +844,85 @@ const FileTransferScreen = () => {
             />
           </View>
 
+          {/* ── Banner Ad — file list ke neeche, buttons ke upar ── */}
+          {DisplayAds && (
+            <View style={styles.bannerAdContainer}>
+              <BannerAd
+                unitId={__DEV__ ? TestIds.ADAPTIVE_BANNER : ProdIDs.ADAPTIVE_BANNER}
+                size={BannerAdSize.ADAPTIVE_BANNER}
+                requestOptions={{ requestNonPersonalizedAdsOnly: false }}
+              />
+            </View>
+          )}
+
           <View style={styles.footer}>
+            {/* Stats cards row */}
             <View style={styles.statsRow}>
-              <View style={styles.statItem}>
-                <View style={[styles.statDot, { backgroundColor: colors.accent }]} />
-                <Text style={[styles.statLabel, { color: colors.subtext, fontFamily: typography.fontFamily }]}>
-                  Remaining: <Text style={{ color: colors.text, fontWeight: '700' }}>{stats.leftData}</Text>
-                </Text>
+              <View style={[styles.statCard, { backgroundColor: isDark ? colors.surface : colors.background, borderColor: colors.border }]}>
+                <Icon name="clock-fast" size={14} color={colors.accent} style={{ marginBottom: 3 }} />
+                <Text style={[styles.statCardValue, { color: colors.text, fontFamily: typography.fontFamily }]}>{stats.leftData}</Text>
+                <Text style={[styles.statCardLabel, { color: colors.subtext, fontFamily: typography.fontFamily }]}>Remaining</Text>
               </View>
-              <View style={styles.statItem}>
-                <View style={[styles.statDot, { backgroundColor: colors.primary }]} />
-                <Text style={[styles.statLabel, { color: colors.subtext, fontFamily: typography.fontFamily }]}>
-                  ETA: <Text style={{ color: colors.text, fontWeight: '700' }}>{stats.eta}</Text>
-                </Text>
+              <View style={[styles.statCard, { backgroundColor: isDark ? colors.surface : colors.background, borderColor: colors.border }]}>
+                <Icon name="timer-outline" size={14} color={colors.primary} style={{ marginBottom: 3 }} />
+                <Text style={[styles.statCardValue, { color: colors.text, fontFamily: typography.fontFamily }]}>{stats.eta}</Text>
+                <Text style={[styles.statCardLabel, { color: colors.subtext, fontFamily: typography.fontFamily }]}>ETA</Text>
+              </View>
+              <View style={[styles.statCard, { backgroundColor: isDark ? colors.surface : colors.background, borderColor: colors.border }]}>
+                <Icon name="harddisk" size={14} color={colors.secondary} style={{ marginBottom: 3 }} />
+                <Text style={[styles.statCardValue, { color: colors.text, fontFamily: typography.fontFamily }]}>{stats.freeSpace || '—'}</Text>
+                <Text style={[styles.statCardLabel, { color: colors.subtext, fontFamily: typography.fontFamily }]}>Free</Text>
               </View>
             </View>
 
-            <View style={[styles.overallProgressBarBg, { backgroundColor: colors.border }]}>
-              <LinearGradient
-                colors={colors.gradient}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 0 }}
-                style={[styles.overallProgressBarFill, { width: `${stats.overallProgress * 100}%` }]}
-              />
+            {/* Overall progress bar with percentage label */}
+            <View style={{ marginBottom: 20 }}>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 }}>
+                <Text style={[{ fontSize: 12, color: colors.subtext, fontFamily: typography.fontFamily }]}>Overall Progress</Text>
+                <Text style={[{ fontSize: 12, fontWeight: '700', color: colors.text, fontFamily: typography.fontFamily }]}>
+                  {Math.round((stats.overallProgress || 0) * 100)}%
+                </Text>
+              </View>
+              <View style={[styles.overallProgressBarBg, { backgroundColor: colors.border }]}>
+                <LinearGradient
+                  colors={colors.gradient}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 0 }}
+                  style={[styles.overallProgressBarFill, { width: `${(stats.overallProgress || 0) * 100}%` }]}
+                />
+              </View>
             </View>
 
             <View style={styles.actionButtons}>
               {Object.values(files).some(f => f.status === 'uploading' || f.status === 'downloading' || f.status === 'pending') && (
                 <TouchableOpacity
-                  style={[styles.cancelBtnBatch, { backgroundColor: colors.warning + '15' }]}
+                  style={[styles.cancelBtnBatch, { backgroundColor: colors.warning + '18', borderWidth: 1.5, borderColor: colors.warning + '40' }]}
                   onPress={handleCancel}
                 >
-                  <Icon name="close-circle-outline" size={20} color={colors.warning} />
+                  <Icon name="close-circle-outline" size={18} color={colors.warning} />
                   <Text style={[styles.cancelText, { color: colors.warning, fontFamily: typography.fontFamily }]}>Cancel</Text>
                 </TouchableOpacity>
               )}
 
               {Object.values(files).some(f => f.status === 'error') && (
                 <TouchableOpacity
-                  style={[styles.retryBtn, { backgroundColor: colors.primary + '15' }]}
+                  style={[styles.retryBtn, { backgroundColor: colors.primary + '15', borderWidth: 1.5, borderColor: colors.primary + '40' }]}
                   onPress={handleRetry}
                 >
-                  <Icon name="refresh" size={20} color={colors.primary} />
+                  <Icon name="refresh" size={18} color={colors.primary} />
                   <Text style={[styles.retryText, { color: colors.primary, fontFamily: typography.fontFamily }]}>Retry Failed</Text>
                 </TouchableOpacity>
               )}
 
               <TouchableOpacity
-                style={[styles.sendMoreBtn, { borderColor: colors.primary }]}
+                style={[styles.sendMoreBtn, { borderColor: colors.primary + '60', backgroundColor: colors.primary + '10' }]}
                 onPress={() => (navigation as any).navigate('Send', {
                   keepConnection: true,
                   currentRole: role,
                   peerDevice: deviceName
                 })}
               >
-                <Icon name="plus" size={20} color={colors.primary} />
+                <Icon name="plus" size={18} color={colors.primary} />
                 <Text style={[styles.sendMoreText, { color: colors.primary, fontFamily: typography.fontFamily }]}>Send More</Text>
               </TouchableOpacity>
             </View>
@@ -843,53 +981,81 @@ const FileTransferScreen = () => {
 const styles = StyleSheet.create({
   container: { flex: 1 },
   headerWrapper: {
-    height: 130,
+    height: 145,
     backgroundColor: 'transparent',
   },
   headerGradient: {
     ...StyleSheet.absoluteFillObject,
-    borderBottomLeftRadius: 24,
-    borderBottomRightRadius: 24,
+    borderBottomLeftRadius: 28,
+    borderBottomRightRadius: 28,
+  },
+  headerGlowTop: {
+    position: 'absolute',
+    top: -40,
+    right: -30,
+    width: 160,
+    height: 160,
+    borderRadius: 80,
+    backgroundColor: 'rgba(255,255,255,0.07)',
+  },
+  headerGlowBottom: {
+    position: 'absolute',
+    bottom: -20,
+    left: -20,
+    width: 110,
+    height: 110,
+    borderRadius: 55,
+    backgroundColor: 'rgba(255,255,255,0.05)',
   },
   headerContent: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 20,
-    paddingTop: Platform.OS === 'android' ? 50 : 20,
-    paddingBottom: 15,
+    paddingTop: Platform.OS === 'android' ? 52 : 22,
+    paddingBottom: 16,
   },
   iconButton: {
-    width: 40,
-    height: 40,
+    width: 38,
+    height: 38,
     justifyContent: 'center',
     alignItems: 'center',
-    borderRadius: 20,
-    backgroundColor: 'rgba(255,255,255,0.15)',
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
   },
   headerTitle: {
     fontSize: 22,
-    fontWeight: '700',
+    fontWeight: '800',
     color: '#FFF',
+    letterSpacing: -0.3,
   },
   headerSubtitle: {
-    fontSize: 14,
-    marginTop: 4,
+    fontSize: 13,
+    marginTop: 2,
+    fontWeight: '500',
   },
-  speedBadge: {
-    flexDirection: 'row',
+  liveDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: '#4ADE80',
+    shadowColor: '#4ADE80',
+    shadowOpacity: 0.8,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 4,
+  },
+  deviceBadge: {
+    width: 18,
+    height: 18,
+    borderRadius: 5,
+    backgroundColor: 'rgba(255,255,255,0.18)',
     alignItems: 'center',
-    backgroundColor: '#FFF',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 20
+    justifyContent: 'center',
   },
-  speedText: {
-    fontSize: 12,
-    fontWeight: '700',
-    marginLeft: 6
-  },
-  // Connection quality badge (replaces speedBadge)
+  // Connection quality badge
   connQualityBadge: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -913,7 +1079,7 @@ const styles = StyleSheet.create({
   celebrationOverlay: {
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(0,0,0,0.55)',
+    backgroundColor: 'rgba(0,0,0,0.6)',
     zIndex: 999,
   },
   confettiEmoji: {
@@ -927,10 +1093,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.35,
-    shadowRadius: 20,
-    elevation: 12,
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.4,
+    shadowRadius: 24,
+    elevation: 16,
   },
   celebrationText: {
     color: '#FFF',
@@ -939,21 +1105,33 @@ const styles = StyleSheet.create({
     marginTop: 24,
     textShadowColor: 'rgba(0,0,0,0.4)',
     textShadowOffset: { width: 0, height: 2 },
-    textShadowRadius: 6,
+    textShadowRadius: 8,
   },
   content: {
     flex: 1,
-    paddingHorizontal: 20,
-    marginTop: -30
+    paddingHorizontal: 16,
+    marginTop: -28,
   },
   listCard: {
     flex: 1,
     borderRadius: 24,
-    padding: 5
+    padding: 4,
+    borderWidth: 1,
+    borderColor: 'rgba(0,0,0,0.04)',
   },
-  listContent: { padding: 15 },
-  fileCard: { flexDirection: 'row', alignItems: 'center', marginBottom: 24 },
-  thumbnailContainer: { width: 50, height: 50, borderRadius: 12, overflow: 'hidden' },
+  listContent: { paddingHorizontal: 14, paddingVertical: 10 },
+  fileCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 20,
+    paddingVertical: 2,
+  },
+  thumbnailContainer: {
+    width: 52,
+    height: 52,
+    borderRadius: 14,
+    overflow: 'hidden',
+  },
   thumbnail: { width: '100%', height: '100%' },
   playIconOverlay: { ...StyleSheet.absoluteFillObject, justifyContent: 'center', alignItems: 'center' },
   playIconBg: {
@@ -963,75 +1141,140 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.6)',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingLeft: 2, // optical center for play icon
+    paddingLeft: 2,
   },
-  iconContainer: { width: 50, height: 50, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
-  fileDetails: { flex: 1, marginLeft: 16 },
-  fileHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
-  fileName: { fontSize: 16, fontWeight: '600', flex: 1, marginRight: 10 },
-  fileSize: { fontSize: 12, fontWeight: 'normal' },
-  progressContainer: { height: 6, borderRadius: 3, overflow: 'hidden' },
+  iconContainer: {
+    width: 52,
+    height: 52,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  fileDetails: { flex: 1, marginLeft: 14 },
+  fileHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: 9,
+  },
+  fileName: {
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 18,
+  },
+  fileSize: {
+    fontSize: 11,
+    fontWeight: '500',
+    marginTop: 2,
+  },
+  statusCheckBadge: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  openBtn: {
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: 8,
+    borderWidth: 1.5,
+  },
+  pendingBadge: {
+    width: 26,
+    height: 26,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1.5,
+  },
+  progressContainer: { height: 5, borderRadius: 4, overflow: 'hidden' },
   progressBarBg: { flex: 1 },
-  progressBarFill: { height: '100%', borderRadius: 3 },
-  footer: { paddingVertical: 24 },
-  statsRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 16, paddingHorizontal: 10 },
+  progressBarFill: { height: '100%', borderRadius: 4 },
+  footer: { paddingTop: 16, paddingBottom: 20 },
+  // Stat cards row
+  statsRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginBottom: 16,
+  },
+  statCard: {
+    flex: 1,
+    borderRadius: 16,
+    paddingVertical: 12,
+    paddingHorizontal: 10,
+    alignItems: 'center',
+    borderWidth: 1,
+  },
+  statCardValue: {
+    fontSize: 13,
+    fontWeight: '800',
+    letterSpacing: -0.2,
+  },
+  statCardLabel: {
+    fontSize: 10,
+    fontWeight: '600',
+    marginTop: 2,
+    letterSpacing: 0.3,
+    textTransform: 'uppercase',
+  },
+  // Legacy stat items (kept for safety)
   statItem: { flexDirection: 'row', alignItems: 'center' },
   statDot: { width: 8, height: 8, borderRadius: 4, marginRight: 8 },
   statLabel: { fontSize: 13 },
-  overallProgressBarBg: { height: 8, borderRadius: 4, overflow: 'hidden', marginBottom: 24 },
-  overallProgressBarFill: { height: '100%', borderRadius: 4 },
-  actionButtons: { flexDirection: 'row', gap: 16 },
+  overallProgressBarBg: { height: 7, borderRadius: 6, overflow: 'hidden', marginBottom: 20 },
+  overallProgressBarFill: { height: '100%', borderRadius: 6 },
+  actionButtons: { flexDirection: 'row', gap: 12 },
   disconnectBtn: {
     flex: 1,
     height: 50,
     borderRadius: 16,
     alignItems: 'center',
-    justifyContent: 'center'
+    justifyContent: 'center',
   },
-  disconnectText: { fontSize: 16, fontWeight: '700' },
+  disconnectText: { fontSize: 15, fontWeight: '700' },
   sendMoreBtn: {
     flex: 1,
-    height: 50,
-    borderRadius: 16,
+    height: 48,
+    borderRadius: 14,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1.5,
     flexDirection: 'row',
-    gap: 8
+    gap: 7,
   },
-  sendMoreText: { fontSize: 16, fontWeight: '700' },
+  sendMoreText: { fontSize: 15, fontWeight: '700' },
   cancelBtnBatch: {
     flex: 1,
-    height: 50,
-    borderRadius: 16,
+    height: 48,
+    borderRadius: 14,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8
+    gap: 7,
   },
-  cancelText: { fontSize: 16, fontWeight: '700' },
+  cancelText: { fontSize: 15, fontWeight: '700' },
   retryBtn: {
     flex: 1,
-    height: 50,
-    borderRadius: 16,
+    height: 48,
+    borderRadius: 14,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8
+    gap: 7,
   },
-  retryText: { fontSize: 16, fontWeight: '700' },
+  retryText: { fontSize: 15, fontWeight: '700' },
   disconnectFullBtn: {
-    height: 50,
+    height: 48,
     width: '100%',
     alignItems: 'center',
     justifyContent: 'center',
     flexDirection: 'row',
     borderWidth: 1.5,
-    borderRadius: 16,
-    marginTop: 16,
-    gap: 8
+    borderRadius: 14,
+    marginTop: 12,
+    gap: 8,
   },
-
   // Completed summary banner
   completedBanner: {
     flexDirection: 'row',
@@ -1039,20 +1282,51 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 10,
     borderBottomWidth: 1,
-    gap: 6,
+    gap: 7,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
   },
   completedDot: {
-    width: 7,
-    height: 7,
-    borderRadius: 4,
+    width: 6,
+    height: 6,
+    borderRadius: 3,
   },
   completedBannerText: {
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '700',
+    letterSpacing: 0.2,
   },
   completedBannerSize: {
     fontSize: 12,
     fontWeight: '500',
+  },
+  completedCheckBadge: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 'auto' as any,
+  },
+  speedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFF',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+  },
+  speedText: {
+    fontSize: 12,
+    fontWeight: '700',
+    marginLeft: 6,
+  },
+  bannerAdContainer: {
+    alignItems: 'center',
+    marginTop: 10,
+    marginBottom: 4,
+    borderRadius: 12,
+    overflow: 'hidden',
   },
 });
 

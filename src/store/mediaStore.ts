@@ -100,7 +100,7 @@ export const useMediaStore = create<MediaState>((set, get) => ({
 
   scanStorageFiles: async () => {
     try {
-      const RNFS = require('react-native-fs').default;
+      const RNFS = require('react-native-fs');
       const rootPath = RNFS.ExternalStorageDirectoryPath;
       const foundDocs: any[] = [];
       const foundAudio: any[] = [];
@@ -174,7 +174,7 @@ export const useMediaStore = create<MediaState>((set, get) => ({
   loadMedia: async () => {
     const { Platform } = require('react-native');
     const { CameraRoll } = require('@react-native-camera-roll/camera-roll');
-    const RNFS = require('react-native-fs').default;
+    const RNFS = require('react-native-fs');
 
     set({ isLoading: true });
     try {
@@ -277,7 +277,7 @@ export const useMediaStore = create<MediaState>((set, get) => ({
 
   pickAndAddDocument: async () => {
     const { pick, types, isErrorWithCode, errorCodes } = require('@react-native-documents/picker');
-    const RNFS = require('react-native-fs').default;
+    const RNFS = require('react-native-fs');
     try {
       const res = await pick({ type: [types.allFiles], allowMultiSelection: true });
       const newDocs = await Promise.all(

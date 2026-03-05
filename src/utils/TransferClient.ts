@@ -25,6 +25,9 @@ export class TransferClient {
     private isProbing = false;
     private downloadedFiles = new Set<string>();
     public onStatus?: (status: TransferStatus) => void;
+  // ── Xender-style: remember sender's IP so we can register back ──
+  public connectedIp: string | null = null;
+  public connectedPort: number = 8888;
 
   // Max auto-retries per file on transient errors (network blip, timeout)
   private static readonly MAX_RETRIES = 3;
@@ -44,6 +47,8 @@ export class TransferClient {
         this.shouldStop = true;
         this.isTransferring = false;
         this.isProbing = false;
+      // Clear peer connection info
+      this.connectedIp = null;
     }
 
   /**
@@ -53,6 +58,32 @@ export class TransferClient {
   clearFailedFile(fileName: string, fileSize: number) {
     this.downloadedFiles.delete(fileName + fileSize);
     console.log(`[TransferClient] Cleared ${fileName} from downloaded set — will resume on next poll.`);
+  }
+
+  /**
+   * Xender-style: Tell the sender our IP and port so they can connect back.
+   * Call this after connection is confirmed (TransferStatus.type === 'connection').
+   */
+  async registerWithPeer(myPort: number): Promise<void> {
+    if (!this.connectedIp || this.shouldStop) {
+      console.warn('[TransferClient] registerWithPeer: no connectedIp, skipping');
+      return;
+    }
+    try {
+      // Use GET with query params to avoid chunked JSON body issues during native TCP streaming
+      // Omit `ip` from params because Sender will read true reachable IP from socket.remoteAddress
+      const url = `http://${this.connectedIp}:${this.connectedPort}/api/register?port=${myPort}`;
+      const controller = new AbortController();
+      const tid = setTimeout(() => controller.abort(), 6000);
+      await fetch(url, {
+        method: 'GET',
+        signal: controller.signal,
+      });
+      clearTimeout(tid);
+      console.log(`[TransferClient] ✅ Registered with peer at ${this.connectedIp}:${this.connectedPort}`);
+    } catch (e) {
+      console.warn('[TransferClient] registerWithPeer failed (non-fatal):', e);
+    }
   }
 
     private reportStatus(status: TransferStatus) {
@@ -65,35 +96,51 @@ export class TransferClient {
         if (this.isProbing || this.shouldStop) return;
         this.isProbing = true;
 
+      // ── CRITICAL FIX: Force traffic through Wi-Fi on Android ──
+      // Must do this BEFORE probing, otherwise OS will try to route via Cellular
+      // because the hotspot has no internet connection!
+      if (Platform.OS === 'android') {
+        try {
+          const WifiManager = require('react-native-wifi-reborn').default;
+          await WifiManager.forceWifiUsage(true);
+        } catch (_) { }
+      }
+
       this.reportStatus({ type: 'log', message: '🔍 Discovering sender...', connected: false });
 
       let foundIp: string | null = null;
 
       // ── If caller already knows the IP (e.g. from QR scan), probe it first ──
         if (specificIp && specificIp !== '0.0.0.0' && specificIp !== '127.0.0.1') {
-          this.reportStatus({
-            type: 'log',
-            message: `🎯 Trying known IP: ${specificIp}...`,
-            connected: false
-          });
-
-          let ok = false;
-          // Retry up to 10 times to allow the Wi-Fi connection to fully establish
-          for (let i = 0; i < 10; i++) {
-            if (this.shouldStop) break;
-            ok = await DiscoveryManager.probeTcpPort(specificIp, port, 3000);
-            if (ok) break;
-
+          // Double-check we don't accidentally probe ourselves (Receiver's own server)
+          const myIp = await DeviceInfo.getIpAddress().catch(() => '');
+          if (specificIp === myIp) {
+            console.log(`[TransferClient] specificIp (${specificIp}) matches my local IP! Skipping direct probe to avoid self-connection.`);
+          } else {
             this.reportStatus({
               type: 'log',
-              message: `⏳ Waiting for network... (Attempt ${i + 1}/10)`,
+              message: `🎯 Trying known IP: ${specificIp}...`,
               connected: false
             });
-            await new Promise(r => setTimeout(r, 2000));
-          }
 
-          if (ok && !this.shouldStop) {
-            foundIp = specificIp;
+            let ok = false;
+            // Retry up to 10 times to allow the Wi-Fi connection to fully establish
+            for (let i = 0; i < 10; i++) {
+              if (this.shouldStop) break;
+              ok = await DiscoveryManager.probeTcpPort(specificIp, port, 3000);
+              if (ok) break;
+
+              this.reportStatus({
+                type: 'log',
+                message: `⏳ Waiting for network... (Attempt ${i + 1}/10)`,
+                connected: false
+              });
+              await new Promise(r => setTimeout(r, 2000));
+            }
+
+            if (ok && !this.shouldStop) {
+              foundIp = specificIp;
+            }
           }
         }
 
@@ -120,16 +167,11 @@ export class TransferClient {
     }
 
     private async persistentLoop(ip: string, port: number, saveDir: string) {
+      // ── Store peer IP so registerWithPeer() can use it ──
+      this.connectedIp = ip;
+      this.connectedPort = port;
       this.reportStatus({ type: 'connection', message: '✅ Connected!', connected: true });
         console.log(`[TransferClient] Standing by for files from ${ip}...`);
-
-      // Force traffic through Wi-Fi on Android (prevent fallback to mobile data)
-      if (Platform.OS === 'android') {
-        try {
-          const WifiManager = require('react-native-wifi-reborn').default;
-          await WifiManager.forceWifiUsage(true);
-        } catch (_) { }
-      }
 
         let failCount = 0;
       while (!this.shouldStop) {
