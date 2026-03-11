@@ -367,15 +367,25 @@ class DiscoveryManager {
         if (done) return;
         done = true;
         clearTimeout(timer);
-        try { client?.destroy(); } catch (_) {}
+        if (client) {
+          try { client.destroy(); } catch (_) { }
+          client = null;
+        }
         resolve(result);
       };
 
       const timer = setTimeout(() => finish(false), timeoutMs);
 
       try {
-        client = TcpSocket.createConnection({ port, host: ip }, () => finish(true));
-        client.on('error', () => finish(false));
+        client = TcpSocket.createConnection({ port, host: ip }, () => {
+          finish(true);
+        });
+        client.on('error', () => {
+          finish(false);
+        });
+        client.on('close', () => {
+          // Socket closed
+        });
       } catch (_) {
         finish(false);
       }

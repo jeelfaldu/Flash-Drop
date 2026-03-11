@@ -4,7 +4,7 @@ import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
 import { BannerAd, BannerAdSize, TestIds } from 'react-native-google-mobile-ads';
 import { DisplayAds, ProdIDs } from '../../utils/Constant';
 
-const adUnitId = __DEV__ ? ProdIDs.ADAPTIVE_BANNER : ProdIDs.ADAPTIVE_BANNER;
+const adUnitId = __DEV__ ? TestIds.ADAPTIVE_BANNER : ProdIDs.ADAPTIVE_BANNER;
 
 interface VideosTabProps {
   videos: any[];

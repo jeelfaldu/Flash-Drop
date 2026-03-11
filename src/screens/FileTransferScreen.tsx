@@ -31,7 +31,7 @@ import { FileCardSkeleton } from '../components/SkeletonLoader';
 import { InterstitialAd, AdEventType, TestIds, BannerAd, BannerAdSize } from 'react-native-google-mobile-ads';
 import { DisplayAds, ProdIDs } from '../utils/Constant';
 
-const interstitialId = __DEV__ ? ProdIDs.INTERSTITIAL : ProdIDs.INTERSTITIAL;
+const interstitialId = __DEV__ ? TestIds.INTERSTITIAL : ProdIDs.INTERSTITIAL;
 const interstitial = InterstitialAd.createForAdRequest(interstitialId, {
   requestNonPersonalizedAdsOnly: false,
 });

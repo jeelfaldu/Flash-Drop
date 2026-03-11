@@ -19,7 +19,7 @@ import { GlobalTransferOverlay } from './src/components/GlobalTransferOverlay';
 import mobileAds, { InterstitialAd, AdEventType, TestIds } from 'react-native-google-mobile-ads';
 import { ProdIDs, DisplayAds } from './src/utils/Constant';
 
-const interstitialAdUnitId = __DEV__ ? ProdIDs.INTERSTITIAL : ProdIDs.INTERSTITIAL;
+const interstitialAdUnitId = __DEV__ ? TestIds.INTERSTITIAL : ProdIDs.INTERSTITIAL;
 const interstitial = InterstitialAd.createForAdRequest(interstitialAdUnitId, {
   requestNonPersonalizedAdsOnly: false,
 });

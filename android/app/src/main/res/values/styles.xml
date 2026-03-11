@@ -5,6 +5,8 @@
         <!-- Customize your theme here. -->
         <item name="android:editTextBackground">@drawable/rn_edit_text_material</item>
         <item name="android:windowBackground">@drawable/background_splash</item>
+        <!-- Temporary opt-out for Android 15 edge-to-edge enforcement to mitigate warnings/layout issues -->
+        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
     </style>
 
 </resources>
