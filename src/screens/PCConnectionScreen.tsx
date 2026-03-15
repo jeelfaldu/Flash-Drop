@@ -23,6 +23,15 @@ import { pick, types, isErrorWithCode, errorCodes } from '@react-native-document
 import RNFS from 'react-native-fs';
 import { usePCConnectionStore } from '../store';
 import HapticUtil from '../utils/HapticUtil';
+import { BannerAd, BannerAdSize, TestIds, InterstitialAd, AdEventType } from 'react-native-google-mobile-ads';
+import { DisplayAds, ProdIDs } from '../utils/Constant';
+
+const adUnitId = __DEV__ ? TestIds.ADAPTIVE_BANNER : ProdIDs.ADAPTIVE_BANNER;
+const interstitialId = __DEV__ ? TestIds.INTERSTITIAL : ProdIDs.INTERSTITIAL;
+
+const interstitial = InterstitialAd.createForAdRequest(interstitialId, {
+  requestNonPersonalizedAdsOnly: true,
+});
 
 const { width } = Dimensions.get('window');
 
@@ -44,7 +53,9 @@ const PCConnectionScreen = ({ navigation }: any) => {
   };
   const [activeTransfers, setActiveTransfers] = useState<TransferItem[]>([]);
   const [recentTransfers, setRecentTransfers] = useState<TransferItem[]>([]);
+  const [isClientConnected, setIsClientConnected] = useState(false);
   const progressAnims = useRef<Record<string, Animated.Value>>({}).current;
+  const scrollViewRef = useRef<ScrollView>(null);
 
   // Animations
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -92,6 +103,11 @@ const PCConnectionScreen = ({ navigation }: any) => {
 
     // Subscribe to both upload and download progress
     TransferServerInstance.statusCallback = (status) => {
+      // Client connected
+      if (status.type === 'client_connected') {
+        setIsClientConnected(true);
+      }
+
       // Phone → PC (download): type 'progress'
       if (status.type === 'progress' && status.fileProgress) {
         const { name, percent, sent, total } = status.fileProgress;
@@ -111,8 +127,22 @@ const PCConnectionScreen = ({ navigation }: any) => {
         animateProgress(id, percent / 100);
         setActiveTransfers(prev => {
           const exists = prev.find(t => t.id === id);
-          if (exists) return prev.map(t => t.id === id ? { ...t, percent, transferred: sent, total } : t);
-          return [...prev, { id, name, percent, transferred: sent, total, direction: 'upload', done: false, timestamp: Date.now() }];
+          const updated = exists
+            ? prev.map(t => t.id === id ? { ...t, percent, transferred: sent, total } : t)
+            : [...prev, { id, name, percent, transferred: sent, total, direction: 'upload' as const, done: false, timestamp: Date.now() }];
+
+          // Auto-complete when progress hits 100%
+          if (percent >= 100) {
+            const doneItem = updated.find(t => t.id === id);
+            if (doneItem) {
+              setRecentTransfers(r => {
+                const filtered = r.filter(rt => rt.id !== id);
+                return [{ ...doneItem, done: true, percent: 100, timestamp: doneItem.timestamp }, ...filtered].slice(0, 50);
+              });
+              return updated.filter(t => t.id !== id);
+            }
+          }
+          return updated;
         });
       }
 
@@ -130,21 +160,57 @@ const PCConnectionScreen = ({ navigation }: any) => {
           const justDone = updatedDone.filter(t => t.done);
           const stillActive = updatedDone.filter(t => !t.done);
           if (justDone.length > 0) {
-            setRecentTransfers(r => [
-              ...justDone.map(t => ({ ...t, timestamp: Date.now() })),
-              ...r,
-            ].slice(0, 10));
+            setRecentTransfers(r => {
+              const justDoneIds = justDone.map(t => t.id);
+              const filtered = r.filter(rt => !justDoneIds.includes(rt.id));
+              return [
+                ...justDone.map(t => ({ ...t, timestamp: t.timestamp })),
+                ...filtered,
+              ].slice(0, 50);
+            });
           }
           return stillActive;
         });
       }
     };
 
+    const unsubscribe = interstitial.addAdEventListener(AdEventType.LOADED, () => {
+      // Ad loaded
+    });
+
+    interstitial.load();
+
+    // ── Handle physical/gesture back to show ad ──
+    const unsubBeforeRemove = navigation.addListener('beforeRemove', (e: any) => {
+      // If we've already handled the ad or ads are disabled, just proceed
+      if (!DisplayAds || !interstitial.loaded) {
+        return;
+      }
+
+      // 1. Prevent the immediate back action
+      e.preventDefault();
+
+      // 2. Show the ad
+      const unsubClosed = interstitial.addAdEventListener(AdEventType.CLOSED, () => {
+        unsubClosed();
+        // 3. Once closed, re-trigger back which will now be allowed by the first "if"
+        navigation.dispatch(e.data.action);
+      });
+      interstitial.show();
+    });
+
     return () => {
       stopServer();
       reset();
+      unsubscribe();
+      unsubBeforeRemove();
     };
-  }, []);
+  }, [navigation]);
+
+  // Auto-scroll to bottom whenever transfers change
+  useEffect(() => {
+    setTimeout(() => scrollViewRef.current?.scrollToEnd({ animated: true }), 100);
+  }, [activeTransfers, recentTransfers]);
 
   const startPCServer = async () => {
     try {
@@ -164,7 +230,21 @@ const PCConnectionScreen = ({ navigation }: any) => {
   const handleStopServer = () => {
     stopServer();
     reset();
-    navigation.goBack();
+    if (DisplayAds) {
+      if (interstitial.loaded) {
+        const unsubClosed = interstitial.addAdEventListener(AdEventType.CLOSED, () => {
+          unsubClosed();
+          navigation.goBack();
+        });
+        interstitial.show();
+      } else {
+        // Fallback if not loaded, just go back
+        navigation.goBack();
+        return;
+      }
+    } else {
+      navigation.goBack();
+    }
   };
 
   const handleSelectFiles = async () => {
@@ -184,6 +264,7 @@ const PCConnectionScreen = ({ navigation }: any) => {
             size,
             type: doc.type ?? 'application/octet-stream',
             uri: doc.uri,
+            timestamp: Date.now(),
           };
         })
       );
@@ -254,87 +335,147 @@ const PCConnectionScreen = ({ navigation }: any) => {
       </View>
 
       <ScrollView
+        ref={scrollViewRef}
         style={{ flex: 1 }}
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
       >
         <Animated.View style={{ opacity: fadeAnim, transform: [{ translateY: slideAnim }] }}>
 
-          {/* ── Animated Icon Area ── */}
-          <View style={styles.iconArea}>
-            {/* Pulse rings */}
-            <Animated.View
-              style={[
-                styles.pulseRing,
-                {
-                  borderColor: colors.primary + '20',
-                  transform: [{ scale: pulseAnim }],
-                },
-              ]}
-            />
-            <Animated.View
-              style={[
-                styles.pulseRing,
-                styles.pulseRing2,
-                {
-                  borderColor: colors.primary + '12',
-                  transform: [{ scale: pulse2Anim }],
-                },
-              ]}
-            />
-            <LinearGradient
-              colors={[colors.primary + '30', colors.primary + '10']}
-              style={styles.iconCircle}
-            >
-              <Icon name="monitor-share" size={56} color={colors.primary} />
-            </LinearGradient>
-          </View>
+          {/* ── Animated Icon Area – hidden when client connects ── */}
+          {!isClientConnected && (
+            <View style={styles.iconArea}>
+              {/* Pulse rings */}
+              <Animated.View
+                style={[
+                  styles.pulseRing,
+                  {
+                    borderColor: colors.primary + '20',
+                    transform: [{ scale: pulseAnim }],
+                  },
+                ]}
+              />
+              <Animated.View
+                style={[
+                  styles.pulseRing,
+                  styles.pulseRing2,
+                  {
+                    borderColor: colors.primary + '12',
+                    transform: [{ scale: pulse2Anim }],
+                  },
+                ]}
+              />
+              <LinearGradient
+                colors={[colors.primary + '30', colors.primary + '10']}
+                style={styles.iconCircle}
+              >
+                <Icon name="monitor-share" size={56} color={colors.primary} />
+              </LinearGradient>
+            </View>
+          )}
 
+          {/* ── Chat-style Transfer Feed ── */}
+          <View style={{ paddingTop: 10, paddingBottom: 20 }}>
+            {[
+              ...recentTransfers.map(t => ({ ...t, bubbleType: 'recent' })),
+              ...activeTransfers.map(t => ({ ...t, bubbleType: 'active' })),
+              ...sharedFiles
+                .filter(sf => {
+                  const isActive = activeTransfers.some(t => (t.name === sf.name || t.name.includes(sf.name)) && t.direction === 'download');
+                  const isDone = recentTransfers.some(t => (t.name === sf.name || t.name.includes(sf.name)) && t.direction === 'download');
+                  return !isActive && !isDone;
+                })
+                .map((sf, index) => ({
+                  id: `pending_${sf.name}_${index}`,
+                  name: sf.name,
+                  percent: 0,
+                  transferred: 0,
+                  total: sf.size,
+                  direction: 'download' as const,
+                  done: false,
+                  timestamp: sf.timestamp || Date.now(),
+                  bubbleType: 'pending'
+                }))
+            ]
+              .sort((a, b) => a.timestamp - b.timestamp)
+              .map((item, index) => {
+                const isPCtoPhone = item.direction === 'upload';
+                const accentColor = isPCtoPhone ? colors.primary : colors.secondary;
 
-          {/* ── Active Transfers ── */}
-          {activeTransfers.length > 0 && (
-            <View style={[styles.uploadCard, { backgroundColor: colors.surface, borderColor: colors.primary + '30', ...layout.shadow.medium }]}>
-              <View style={styles.transfersHeader}>
-                <View style={[styles.uploadIconBox, { backgroundColor: colors.primary + '15' }]}>
-                  <Icon name="transfer" size={20} color={colors.primary} />
-                </View>
-                <Text style={[styles.transfersTitle, { color: colors.text, fontFamily: typography.fontFamily }]}>
-                  Active Transfers
-                </Text>
-                <View style={[styles.transfersBadge, { backgroundColor: colors.primary }]}>
-                  <Text style={styles.transfersBadgeText}>{activeTransfers.length}</Text>
-                </View>
-              </View>
-
-              {activeTransfers.map((t) => {
-                const anim = getOrCreateAnim(t.id);
-                const isUpload = t.direction === 'upload';
-                const accentColor = isUpload ? colors.secondary : colors.primary;
+              if (item.bubbleType === 'recent') {
+                const bubbleBg = isPCtoPhone
+                  ? (isDark ? '#1A2A1A' : '#F0FFF4')
+                  : (isDark ? '#1A1A2A' : '#F5F0FF');
                 return (
-                  <View key={t.id} style={[styles.transferRow, { borderTopColor: colors.border }]}>
-                    <View style={[styles.directionBadge, { backgroundColor: accentColor + '18' }]}>
-                      <Icon
-                        name={isUpload ? 'arrow-down-bold' : 'arrow-up-bold'}
-                        size={14}
-                        color={accentColor}
-                      />
-                    </View>
-                    <View style={{ flex: 1, marginLeft: 10 }}>
-                      <View style={styles.transferTopRow}>
+                  <View
+                    key={`recent_${item.id}_${item.timestamp}_${index}`}
+                    style={[
+                      styles.chatBubbleWrapper,
+                      isPCtoPhone ? { alignSelf: 'flex-start', alignItems: 'flex-start' } : { alignSelf: 'flex-end', alignItems: 'flex-end' },
+                    ]}
+                  >
+                    <Text style={[styles.chatBubbleLabel, { color: accentColor, fontFamily: typography.fontFamily }]}>
+                      {isPCtoPhone ? '🖥  PC' : '📱 Phone'}
+                    </Text>
+                    <View style={[styles.chatBubbleDone, { backgroundColor: bubbleBg, borderColor: colors.success + '30' }]}>
+                      <View style={styles.chatBubbleTop}>
+                        <View style={[styles.chatFileIcon, { backgroundColor: colors.success + '20' }]}>
+                          <Icon name="file-check" size={16} color={colors.success} />
+                        </View>
                         <Text
-                          style={[styles.uploadFileName, { color: colors.text, fontFamily: typography.fontFamily, flex: 1 }]}
+                          style={[styles.chatFileName, { color: colors.text, fontFamily: typography.fontFamily }]}
                           numberOfLines={1}
                         >
-                          {t.name}
+                          {item.name}
                         </Text>
-                        <Text style={[styles.uploadPercent, { color: accentColor, fontFamily: typography.fontFamily, fontSize: 14 }]}>
-                          {t.percent}%
+                        <Icon name="check-circle" size={16} color={colors.success} style={{ marginLeft: 4 }} />
+                      </View>
+                      <Text style={[styles.chatSizeText, { color: colors.subtext, fontFamily: typography.fontFamily, marginTop: 4 }]}>
+                        {formatSize(item.total)} · Done
+                      </Text>
+                    </View>
+                  </View>
+                );
+              }
+
+              if (item.bubbleType === 'active') {
+                const anim = getOrCreateAnim(item.id);
+                const bubbleBg = isPCtoPhone
+                  ? (isDark ? colors.primary + '22' : colors.primary + '14')
+                  : (isDark ? colors.secondary + '22' : colors.secondary + '14');
+                return (
+                  <View
+                    key={`active_${item.id}_${index}`}
+                    style={[
+                      styles.chatBubbleWrapper,
+                      isPCtoPhone ? { alignSelf: 'flex-start', alignItems: 'flex-start' } : { alignSelf: 'flex-end', alignItems: 'flex-end' },
+                    ]}
+                  >
+                    {/* Direction label */}
+                    <Text style={[styles.chatBubbleLabel, { color: accentColor, fontFamily: typography.fontFamily }]}>
+                      {isPCtoPhone ? '🖥  PC' : '📱 Phone'}
+                    </Text>
+                    <View style={[styles.chatBubble, { backgroundColor: bubbleBg, borderColor: accentColor + '30' }]}>
+                      {/* File icon + name row */}
+                      <View style={styles.chatBubbleTop}>
+                        <View style={[styles.chatFileIcon, { backgroundColor: accentColor + '20' }]}>
+                          <Icon name="file" size={16} color={accentColor} />
+                        </View>
+                        <Text
+                          style={[styles.chatFileName, { color: colors.text, fontFamily: typography.fontFamily }]}
+                          numberOfLines={1}
+                        >
+                          {item.name}
+                        </Text>
+                        <Text style={[styles.chatPercent, { color: accentColor, fontFamily: typography.fontFamily }]}>
+                          {item.percent}%
                         </Text>
                       </View>
-                      <View style={[styles.uploadBarBg, { backgroundColor: isDark ? '#2A2A2A' : '#EBEBEB', marginTop: 6 }]}>
+                      {/* Progress bar */}
+                      <View style={[styles.chatBarBg, { backgroundColor: isDark ? '#2A2A2A' : '#DCDCDC' }]}>
                         <Animated.View
                           style={[
-                            styles.uploadBarFill,
+                            styles.chatBarFill,
                             {
                               backgroundColor: accentColor,
                               width: anim.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] }),
@@ -342,210 +483,168 @@ const PCConnectionScreen = ({ navigation }: any) => {
                           ]}
                         />
                       </View>
-                      <Text style={[styles.uploadSizeText, { color: colors.subtext, fontFamily: typography.fontFamily, marginTop: 4 }]}>
-                        {isUpload ? 'PC → Phone' : 'Phone → PC'} • {formatSize(t.transferred)} / {formatSize(t.total)}
+                      {/* Size info */}
+                      <Text style={[styles.chatSizeText, { color: colors.subtext, fontFamily: typography.fontFamily }]}>
+                        {formatSize(item.transferred)} / {formatSize(item.total)}
                       </Text>
                     </View>
                   </View>
                 );
-              })}
+              }
+
+              if (item.bubbleType === 'pending') {
+                const bubbleBg = isDark ? colors.secondary + '22' : colors.secondary + '14';
+                return (
+                  <View key={`pending_${item.id}_${index}`} style={[styles.chatBubbleWrapper, { alignSelf: 'flex-end', alignItems: 'flex-end' }]}>
+                    <Text style={[styles.chatBubbleLabel, { color: colors.secondary, fontFamily: typography.fontFamily }]}>
+                      📱 Phone
+                    </Text>
+                    <View style={[styles.chatBubble, { backgroundColor: bubbleBg, borderColor: colors.secondary + '30' }]}>
+                      <View style={styles.chatBubbleTop}>
+                        <View style={[styles.chatFileIcon, { backgroundColor: colors.secondary + '20' }]}>
+                          <Icon name="clock-outline" size={16} color={colors.secondary} />
+                        </View>
+                        <Text style={[styles.chatFileName, { color: colors.text, fontFamily: typography.fontFamily }]} numberOfLines={1}>
+                          {item.name}
+                        </Text>
+                        <Icon name="check" size={16} color={colors.secondary} style={{ marginLeft: 4 }} />
+                      </View>
+                      <Text style={[styles.chatSizeText, { color: colors.subtext, fontFamily: typography.fontFamily, marginTop: 4 }]}>
+                        {formatSize(item.total)} · Sent
+                      </Text>
+                    </View>
+                  </View>
+                );
+              }
+
+              return null;
+            })}
+          </View>
+
+
+          {/* ── Status: Starting spinner (only before ready) ── */}
+          {!isServerRunning && (
+            <View
+              style={[
+                styles.statusCard,
+                { backgroundColor: colors.surface, borderColor: colors.border, ...layout.shadow.medium },
+              ]}
+            >
+              <View style={styles.statusRow}>
+                <View style={[styles.statusIndicator, { backgroundColor: colors.border }]}>
+                  <Icon name="loading" size={22} color={colors.subtext} />
+                </View>
+                <View style={{ flex: 1, marginLeft: 14 }}>
+                  <Text style={[styles.statusTitle, { color: colors.text, fontFamily: typography.fontFamily }]}>
+                    Starting Server...
+                  </Text>
+                  <Text style={[styles.statusSub, { color: colors.subtext, fontFamily: typography.fontFamily }]}>
+                    Please wait a moment...
+                  </Text>
+                </View>
+              </View>
             </View>
           )}
 
-          {/* ── Recent Transfers ── */}
-          {recentTransfers.length > 0 && (
-            <View style={[styles.uploadCard, { backgroundColor: colors.surface, borderColor: colors.border, ...layout.shadow.light }]}>
-              <View style={[styles.transfersHeader, { marginBottom: 8 }]}>
-                <View style={[styles.uploadIconBox, { backgroundColor: colors.success + '15' }]}>
-                  <Icon name="history" size={20} color={colors.success} />
-                </View>
-                <Text style={[styles.transfersTitle, { color: colors.text, fontFamily: typography.fontFamily }]}>
-                  Recent
-                </Text>
-              </View>
-              {recentTransfers.slice(0, 5).map((t) => (
-                <View key={`${t.id}_${t.timestamp}`} style={[styles.recentRow, { borderTopColor: colors.border }]}>
-                  <Icon
-                    name={t.direction === 'upload' ? 'arrow-down-circle' : 'arrow-up-circle'}
-                    size={18}
-                    color={t.direction === 'upload' ? colors.secondary : colors.primary}
-                  />
-                  <Text
-                    style={[styles.recentName, { color: colors.text, fontFamily: typography.fontFamily }]}
-                    numberOfLines={1}
-                  >
-                    {t.name}
+          {/* ── Compact URL pill (server ready) ── */}
+          {isServerRunning && serverUrl && !isClientConnected && (
+            <View style={[styles.urlPill, { backgroundColor: colors.surface, borderColor: colors.primary + '30', ...layout.shadow.light }]}>
+              <View style={[styles.urlPillDot, { backgroundColor: colors.success }]} />
+              <Icon name="web" size={16} color={colors.primary} style={{ marginRight: 8 }} />
+              <Text
+                selectable
+                style={[styles.urlPillText, { color: colors.primary, fontFamily: typography.fontFamily }]}
+                numberOfLines={1}
+              >
+                {serverUrl}
+              </Text>
+              <TouchableOpacity
+                onPress={handleShare}
+                style={[styles.urlPillShare, { backgroundColor: colors.primary + '15' }]}
+                activeOpacity={0.7}
+              >
+                <Icon name="share-variant" size={16} color={colors.primary} />
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {/* ── How it works – hidden when client connects ── */}
+          {!isClientConnected && (
+            <View style={[styles.howCard, { backgroundColor: colors.surface, borderColor: colors.border, ...layout.shadow.light }]}>
+              <Text style={[styles.howTitle, { color: colors.text, fontFamily: typography.fontFamily }]}>
+                How it works
+              </Text>
+              {[
+                { icon: 'wifi', color: '#00B0FF', step: '1', text: 'Make sure Phone & PC are on the same Wi-Fi network.' },
+                { icon: 'monitor', color: colors.primary, step: '2', text: 'Open any browser on your PC and type the URL above.' },
+                { icon: 'file-upload', color: colors.success, step: '3', text: 'Select files on PC and they will transfer instantly!' },
+              ].map((item) => (
+                <View key={item.step} style={styles.stepRow}>
+                  <View style={[styles.stepNumBox, { backgroundColor: item.color + '18' }]}>
+                    <Icon name={item.icon} size={20} color={item.color} />
+                  </View>
+                  <Text style={[styles.stepText, { color: colors.subtext, fontFamily: typography.fontFamily }]}>
+                    {item.text}
                   </Text>
-                  <Text style={[styles.recentSize, { color: colors.subtext, fontFamily: typography.fontFamily }]}>
-                    {formatSize(t.total)}
-                  </Text>
-                  <Icon name="check-circle" size={16} color={colors.success} />
                 </View>
               ))}
             </View>
           )}
 
 
-          {/* ── Status Card ── */}
-          <View
-            style={[
-              styles.statusCard,
-              {
-                backgroundColor: colors.surface,
-                borderColor: isServerRunning
-                  ? colors.success + '30'
-                  : colors.border,
-                ...layout.shadow.medium,
-              },
-            ]}
-          >
-            <View style={styles.statusRow}>
-              <View
-                style={[
-                  styles.statusIndicator,
-                  {
-                    backgroundColor: isServerRunning
-                      ? colors.success + '18'
-                      : colors.border,
-                  },
-                ]}
-              >
-                <Icon
-                  name={isServerRunning ? 'check-circle' : 'loading'}
-                  size={22}
-                  color={isServerRunning ? colors.success : colors.subtext}
-                />
-              </View>
-              <View style={{ flex: 1, marginLeft: 14 }}>
-                <Text
-                  style={[
-                    styles.statusTitle,
-                    { color: colors.text, fontFamily: typography.fontFamily },
-                  ]}
-                >
-                  {isServerRunning ? 'Server Ready' : 'Starting Server...'}
-                </Text>
-                <Text
-                  style={[
-                    styles.statusSub,
-                    { color: colors.subtext, fontFamily: typography.fontFamily },
-                  ]}
-                >
-                  {isServerRunning
-                    ? 'Open the URL on your PC browser'
-                    : 'Please wait a moment...'}
-                </Text>
-              </View>
-            </View>
-
-            {/* URL Display */}
-            {isServerRunning && serverUrl && (
-              <View
-                style={[
-                  styles.urlBox,
-                  { backgroundColor: isDark ? colors.background : '#F5F3FF' },
-                ]}
-              >
-                <Icon name="web" size={18} color={colors.primary} style={{ marginRight: 10 }} />
-                <Text
-                  selectable
-                  style={[
-                    styles.urlText,
-                    { color: colors.primary, fontFamily: typography.fontFamily, flex: 1 },
-                  ]}
-                  numberOfLines={1}
-                >
-                  {serverUrl}
-                </Text>
-                <TouchableOpacity
-                  onPress={handleShare}
-                  style={[styles.shareBtn, { backgroundColor: colors.primary + '18' }]}
-                  activeOpacity={0.7}
-                >
-                  <Icon name="share-variant" size={18} color={colors.primary} />
-                </TouchableOpacity>
-              </View>
-            )}
-          </View>
-
-          {/* ── How it works ── */}
-          <View style={[styles.howCard, { backgroundColor: colors.surface, borderColor: colors.border, ...layout.shadow.light }]}>
-            <Text style={[styles.howTitle, { color: colors.text, fontFamily: typography.fontFamily }]}>
-              How it works
-            </Text>
-            {[
-              { icon: 'wifi', color: '#00B0FF', step: '1', text: 'Make sure Phone & PC are on the same Wi-Fi network.' },
-              { icon: 'monitor', color: colors.primary, step: '2', text: 'Open any browser on your PC and type the URL above.' },
-              { icon: 'file-upload', color: colors.success, step: '3', text: 'Select files on PC and they will transfer instantly!' },
-            ].map((item) => (
-              <View key={item.step} style={styles.stepRow}>
-                <View style={[styles.stepNumBox, { backgroundColor: item.color + '18' }]}>
-                  <Icon name={item.icon} size={20} color={item.color} />
-                </View>
-                <Text style={[styles.stepText, { color: colors.subtext, fontFamily: typography.fontFamily }]}>
-                  {item.text}
-                </Text>
-              </View>
-            ))}
-          </View>
-
-          {/* ── Shared Files Badge ── */}
-          {sharedFiles.length > 0 && (
-            <View
-              style={[
-                styles.filesBadge,
-                { backgroundColor: colors.primary + '12', borderColor: colors.primary + '30' },
-              ]}
-            >
-              <Icon name="file-multiple" size={20} color={colors.primary} />
-              <Text
-                style={[
-                  styles.filesBadgeText,
-                  { color: colors.primary, fontFamily: typography.fontFamily },
-                ]}
-              >
-                {sharedFiles.length} file{sharedFiles.length !== 1 ? 's' : ''} ready to serve
-              </Text>
-            </View>
-          )}
-
-          {/* ── Action Buttons ── */}
-          <View style={styles.actionsRow}>
-            {isServerRunning && (
-              <TouchableOpacity
-                style={[styles.actionBtn, { backgroundColor: colors.primary, flex: 1, marginRight: 10 }]}
-                onPress={handleSelectFiles}
-                activeOpacity={0.85}
-              >
-                <Icon name="file-plus" size={20} color="#FFF" />
-                <Text style={[styles.actionBtnText, { fontFamily: typography.fontFamily }]}>
-                  Add Files
-                </Text>
-              </TouchableOpacity>
-            )}
-            <TouchableOpacity
-              style={[
-                styles.actionBtn,
-                {
-                  backgroundColor: isDark ? 'rgba(255,71,87,0.12)' : '#FFEBEE',
-                  borderWidth: 1,
-                  borderColor: colors.error + '40',
-                  flex: isServerRunning ? undefined : 1,
-                  paddingHorizontal: isServerRunning ? 20 : 24,
-                },
-              ]}
-              onPress={handleStopServer}
-              activeOpacity={0.85}
-            >
-              <Icon name="power" size={20} color={colors.error} />
-              <Text style={[styles.actionBtnText, { color: colors.error, fontFamily: typography.fontFamily }]}>
-                Stop
-              </Text>
-            </TouchableOpacity>
-          </View>
 
         </Animated.View>
       </ScrollView>
+
+      {/* ── Fixed Bottom Banner Ad ── */}
+      {DisplayAds && (
+        <View style={{ alignItems: 'center', backgroundColor: colors.surface, paddingVertical: 4 }}>
+          <BannerAd
+            unitId={adUnitId}
+            size={BannerAdSize.ANCHORED_ADAPTIVE_BANNER}
+            requestOptions={{
+              requestNonPersonalizedAdsOnly: true,
+            }}
+          />
+        </View>
+      )}
+
+      {/* ── Fixed Bottom Actions Row ── */}
+      <SafeAreaView style={{ backgroundColor: colors.surface }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingVertical: 12, borderTopWidth: 1, borderTopColor: colors.border }}>
+          {isServerRunning && (
+            <TouchableOpacity
+              style={[styles.actionBtn, { backgroundColor: colors.primary, flex: 1, marginRight: 10 }]}
+              onPress={handleSelectFiles}
+              activeOpacity={0.85}
+            >
+              <Icon name="send" size={18} color="#FFF" style={{ paddingLeft: 4 }} />
+              <Text style={[styles.actionBtnText, { fontFamily: typography.fontFamily }]}>
+                Send Files
+              </Text>
+            </TouchableOpacity>
+          )}
+          <TouchableOpacity
+            style={[
+              styles.actionBtn,
+              {
+                backgroundColor: isDark ? 'rgba(255,71,87,0.12)' : '#FFEBEE',
+                borderWidth: 1,
+                borderColor: colors.error + '40',
+                flex: isServerRunning ? undefined : 1,
+                paddingHorizontal: isServerRunning ? 20 : 24,
+              },
+            ]}
+            onPress={handleStopServer}
+            activeOpacity={0.85}
+          >
+            <Icon name="power" size={20} color={colors.error} />
+            <Text style={[styles.actionBtnText, { color: colors.error, fontFamily: typography.fontFamily }]}>
+              Stop
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
     </View>
   );
 };
@@ -728,6 +827,145 @@ const styles = StyleSheet.create({
     paddingTop: 10,
   },
 
+  // ── Chat-style transfer card ──
+  chatCard: {
+    borderRadius: 20,
+    padding: 16,
+    borderWidth: 1,
+    marginBottom: 16,
+  },
+  chatHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 10,
+  },
+  chatHeaderIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  chatHeaderTitle: {
+    flex: 1,
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  chatActiveBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    borderRadius: 20,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+  chatActiveDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#FFF',
+  },
+  chatActiveBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#FFF',
+  },
+  chatLegend: {
+    flexDirection: 'row',
+    gap: 16,
+    marginBottom: 14,
+    paddingBottom: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'rgba(128,128,128,0.2)',
+  },
+  chatLegendItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  chatLegendDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+  },
+  chatLegendText: {
+    fontSize: 11,
+    fontWeight: '500',
+  },
+  chatBubbleWrapper: {
+    width: '80%',
+    marginBottom: 10,
+  },
+  chatBubbleLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    marginBottom: 3,
+    letterSpacing: 0.3,
+  },
+  chatBubble: {
+    borderRadius: 16,
+    padding: 12,
+    width: '100%',
+    borderWidth: 1,
+  },
+  chatBubbleDone: {
+    borderRadius: 16,
+    padding: 12,
+    borderWidth: 1,
+  },
+  chatBubbleTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    width: '100%',
+    marginBottom: 8,
+  },
+  chatFileIcon: {
+    width: 28,
+    height: 28,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  chatFileName: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  chatPercent: {
+    fontSize: 13,
+    fontWeight: '800',
+    minWidth: 38,
+    textAlign: 'right',
+  },
+  chatBarBg: {
+    height: 5,
+    borderRadius: 3,
+    overflow: 'hidden',
+    marginBottom: 6,
+  },
+  chatBarFill: {
+    height: '100%',
+    borderRadius: 3,
+  },
+  chatSizeText: {
+    fontSize: 10,
+    fontWeight: '500',
+  },
+  chatDivider: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    marginVertical: 10,
+    alignItems: 'center',
+    paddingTop: 6,
+  },
+  chatDividerText: {
+    fontSize: 11,
+    fontWeight: '600',
+    letterSpacing: 0.4,
+  },
+
   // Files badge
   filesBadge: {
     flexDirection: 'row',
@@ -874,6 +1112,37 @@ const styles = StyleSheet.create({
   recentSize: {
     fontSize: 11,
     fontWeight: '500',
+  },
+
+  // Compact URL pill (replaces status card once server is ready)
+  urlPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderWidth: 1,
+    marginBottom: 14,
+    gap: 4,
+  },
+  urlPillDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 6,
+  },
+  urlPillText: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  urlPillShare: {
+    width: 32,
+    height: 32,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 6,
   },
 });
 

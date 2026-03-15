@@ -66,6 +66,8 @@ const FileTransferScreen = () => {
   ).current;
   // Fix: store auto-hide timeout ref so it can be cleared on unmount (memory leak prevention)
   const celebrationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Prevent celebration from firing multiple times for same batch
+  const didCelebrate = useRef(false);
 
   // Zustand store
   const {
@@ -161,6 +163,11 @@ const FileTransferScreen = () => {
     };
   }, [role, deviceName]); // Avoid tracking isTransferring here to prevent cyclic updates
 
+  // Reset celebration guard whenever a new transfer batch starts
+  useEffect(() => {
+    didCelebrate.current = false;
+  }, [initialFiles]);
+
   useEffect(() => {
     // Update files list when initialFiles changes (Send More)
     if (initialFiles && Array.isArray(initialFiles)) {
@@ -201,14 +208,28 @@ const FileTransferScreen = () => {
       // Sender: track outgoing files via own server
       TransferServer.statusCallback = (status) => {
         if (status.type === 'progress' && status.fileProgress) {
-          updateFileProgress(status.fileProgress.name, status.fileProgress.percent, status.fileProgress.sent);
+          updateFileProgress(
+            status.fileProgress.name,
+            status.fileProgress.percent,
+            status.fileProgress.sent,
+            status.fileProgress.total,
+            status.fileProgress.speed,
+            status.fileProgress.etaSecs,
+          );
         }
       };
     } else {
       // Receiver: track downloads from sender
       TransferClient.onStatus = (status: TransferStatus) => {
         if (status.type === 'progress' && status.fileProgress) {
-          updateFileProgress(status.fileProgress.name, status.fileProgress.percent, status.fileProgress.received);
+          updateFileProgress(
+            status.fileProgress.name,
+            status.fileProgress.percent,
+            status.fileProgress.received,
+            status.fileProgress.total,    // ← pass total so file size shows correctly
+            status.fileProgress.speed,
+            status.fileProgress.etaSecs
+          );
         }
 
         if (status.files) {
@@ -217,15 +238,20 @@ const FileTransferScreen = () => {
             let added = false;
             (status.files as any[]).forEach((f: any) => {
               if (!updated[f.name]) {
+                // File not in list yet — add it
                 updated[f.name] = {
                   id: f.name,
                   uri: '',
                   name: f.name,
-                  size: f.size,
+                  size: f.size || 0,
                   progress: 0,
                   status: 'pending' as const,
                   type: f.type
                 };
+                added = true;
+              } else if (!updated[f.name].size && f.size) {
+                // File was added via progress (size=0) — update its real size
+                updated[f.name] = { ...updated[f.name], size: f.size };
                 added = true;
               }
             });
@@ -283,7 +309,7 @@ const FileTransferScreen = () => {
       TransferClient.onStatus = (status: TransferStatus) => {
         if (status.type === 'progress' && status.fileProgress) {
           // Receiver is sending us files — show in sender's file list
-          const { name, percent, received } = status.fileProgress;
+          const { name, percent, received, speed, etaSecs } = status.fileProgress;
           setFiles((prev) => {
             const updated = { ...prev };
             if (updated[name]) {
@@ -295,6 +321,10 @@ const FileTransferScreen = () => {
             }
             return updated;
           });
+          // Also update stats for reverse direction
+          if (speed !== undefined && etaSecs !== undefined) {
+            updateStatsFromClientSpeed(speed, etaSecs, name, percent);
+          }
         }
 
         if (status.files) {
@@ -336,12 +366,36 @@ const FileTransferScreen = () => {
     };
   }, [role]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const updateFileProgress = (name: string, percent: number, currentSize: number) => {
+  // ── Stats update from rolling-average speed provided by TransferClient ─────
+  const updateStatsFromClientSpeed = (speedBps: number, etaSecs: number, name: string, percent: number) => {
+    setStats((prevStat: any) => {
+      const speed = speedBps > 1024 * 1024
+        ? (speedBps / (1024 * 1024)).toFixed(2) + ' MB/s'
+        : speedBps > 0
+          ? (speedBps / 1024).toFixed(2) + ' KB/s'
+          : prevStat.transferSpeed || '0 KB/s';
+
+      let eta = '--:--';
+      if (etaSecs > 0 && etaSecs < 3600) {
+        const mins = Math.floor(etaSecs / 60);
+        const secs = etaSecs % 60;
+        eta = `${mins}:${secs < 10 ? '0' : ''}${secs}`;
+      } else if (etaSecs >= 3600) {
+        eta = '> 1h';
+      }
+
+      return { ...prevStat, transferSpeed: speed, eta };
+    });
+  };
+
+  const updateFileProgress = (name: string, percent: number, currentSize: number, fileTotal?: number, speedBps?: number, etaSecs?: number) => {
     setFiles((prev) => {
       const updated = { ...prev };
       if (updated[name]) {
         updated[name] = {
           ...updated[name],
+          // Update size if we now know it (e.g. entry was created by progress before files list arrived)
+          size: (updated[name].size || 0) > 0 ? updated[name].size : (fileTotal || 0),
           progress: percent / 100,
           status: percent === 100 ? ('completed' as const) : (role === 'sender' ? 'uploading' as const : 'downloading' as const)
         };
@@ -350,71 +404,73 @@ const FileTransferScreen = () => {
           id: name,
           uri: '',
           name,
-          size: 0,
+          size: fileTotal || 0,  // use known total, not 0
           progress: percent / 100,
           type: 'file',
           status: role === 'sender' ? ('uploading' as const) : ('downloading' as const)
         };
       }
 
-      // Calculate overall progress using the latest updated files
+      // Calculate overall progress
       const allFiles = Object.values(updated) as FileItem[];
-      const totalTransferred = allFiles.reduce((acc: number, f: FileItem) => acc + ((f.size || 0) * (typeof f.progress === 'number' ? f.progress : 0)), 0);
+      const totalTransferred = allFiles.reduce((acc: number, f: FileItem) =>
+        acc + ((f.size || 0) * (typeof f.progress === 'number' ? f.progress : 0)), 0);
       const totalSize = allFiles.reduce((acc: number, f: FileItem) => acc + (f.size || 0), 0);
+      const progress = totalSize > 0 ? totalTransferred / totalSize : 0;
 
       setStats((prevStat: any) => {
         const now = Date.now();
-        const timeDiff = (now - prevStat.lastUpdateTime) / 1000;
-        const bytesDiff = totalTransferred - prevStat.lastTransferredSize;
 
-        let speed = '0 KB/s';
-        if (timeDiff > 0 && bytesDiff >= 0) {
-          const bytesPerSecond = bytesDiff / timeDiff;
-          if (bytesPerSecond > 1024 * 1024) {
-            speed = (bytesPerSecond / (1024 * 1024)).toFixed(2) + ' MB/s';
-          } else {
-            speed = (bytesPerSecond / 1024).toFixed(2) + ' KB/s';
+        // ── Speed: both sender and receiver now get speed/etaSecs from their respective engines ──
+        // Sender → TransferServer.report() calculates wall-clock speed
+        // Receiver → TransferClient progress callback calculates hybrid speed
+        let speed = prevStat.transferSpeed || '0 KB/s';
+        let eta = prevStat.eta || '--:--';
+
+        if (speedBps !== undefined && speedBps > 0) {
+          speed = speedBps > 1024 * 1024
+            ? (speedBps / (1024 * 1024)).toFixed(2) + ' MB/s'
+            : (speedBps / 1024).toFixed(2) + ' KB/s';
+
+          if (etaSecs !== undefined && etaSecs > 0 && etaSecs < 86400) {
+            if (etaSecs < 3600) {
+              const mins = Math.floor(etaSecs / 60);
+              const secs = Math.floor(etaSecs % 60);
+              eta = `${mins}:${secs < 10 ? '0' : ''}${secs}`;
+            } else {
+              eta = '> 1h';
+            }
+          } else if (percent >= 100) {
+            eta = '0:00';
           }
+        } else if (speedBps === 0) {
+          // Engine says speed=0 (just started or stalled) — keep last known, no flicker
         }
+        // speedBps undefined should no longer happen with unified approach
 
-        const progress = totalSize > 0 ? totalTransferred / totalSize : 0;
-
-        if (now - prevStat.lastUpdateTime > 1000 || progress === 1) {
-          if (progress === 1) {
+        // Notifications and celebrations — throttle to avoid spam
+        if (now - prevStat.lastUpdateTime > 1500 || progress >= 1) {
+          if (progress >= 1 && !didCelebrate.current) {
+            didCelebrate.current = true;
             NotificationService.displayCompleteNotification(name, true);
-            // ── Haptic celebrate on full completion ──────────────────────
             HapticUtil.celebrate();
             triggerCelebration();
-          } else {
-            if (percent === 100) HapticUtil.success(); // per-file complete
+          } else if (progress < 1) {
+            if (percent === 100) HapticUtil.success();
             NotificationService.displayTransferNotification(name, progress, role === 'sender');
-          }
-        }
-
-        let eta = '--:--';
-        const remainingBytes = totalSize - totalTransferred;
-        if (bytesDiff > 0 && timeDiff > 0 && remainingBytes > 0) {
-          const bytesPerSecond = bytesDiff / timeDiff;
-          const secondsLeft = Math.floor(remainingBytes / bytesPerSecond);
-          if (secondsLeft < 3600) {
-            const mins = Math.floor(secondsLeft / 60);
-            const secs = secondsLeft % 60;
-            eta = `${mins}:${secs < 10 ? '0' : ''}${secs}`;
-          } else {
-            eta = '> 1h';
           }
         }
 
         return {
           ...prevStat,
           transferredSize: totalTransferred,
-          totalSize: totalSize,
+          totalSize,
           overallProgress: progress,
           leftData: formatSize(Math.max(0, totalSize - totalTransferred)),
           transferSpeed: speed,
-          eta: eta,
+          eta,
           lastUpdateTime: now,
-          lastTransferredSize: totalTransferred
+          lastTransferredSize: totalTransferred,
         };
       });
 

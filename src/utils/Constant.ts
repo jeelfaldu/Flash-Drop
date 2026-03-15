@@ -1,6 +1,6 @@
 import { Platform } from "react-native";
 
-export const DisplayAds: boolean = true;
+export const DisplayAds: boolean = false;
 
 export const ProdIDs = {
   APP_OPEN: '',

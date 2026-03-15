@@ -64,6 +64,13 @@ const SharingScreen = ({ route, navigation }: any) => {
     };
   }, []);
 
+  // Handle items being added dynamically (e.g. via Share Intent)
+  useEffect(() => {
+    if (items && items.length > 0 && status === 'ready') {
+      TransferServer.updateFiles(items);
+    }
+  }, [items, status]);
+
     const setupHotspot = async () => {
         try {
           setStatus('checking_connection');
@@ -96,10 +103,11 @@ const SharingScreen = ({ route, navigation }: any) => {
 
           if (info) {
             setGroupInfo(info);
+            const secretKey = Math.random().toString(36).substring(2, 10) + Math.random().toString(36).substring(2, 10);
             setConnected(true);
             setConnectionDetails({ type: 'wifi-direct', ssid: info.ssid, ip: info.ownerIp });
-            setQrData(JSON.stringify({ ssid: info.ssid, pass: info.pass, ip: info.ownerIp, mac: info.mac }));
-            startServer();
+            setQrData(JSON.stringify({ ssid: info.ssid, pass: info.pass, ip: info.ownerIp, mac: info.mac, key: secretKey }));
+            startServer(secretKey);
           } else {
             setStatus('error');
             Alert.alert("Error", "Failed to get Hotspot info.");
@@ -108,11 +116,12 @@ const SharingScreen = ({ route, navigation }: any) => {
           setStatus('getting_info');
           const ip = await DeviceInfo.getIpAddress();
           if (ip && ip !== '0.0.0.0' && ip !== '127.0.0.1') {
+            const secretKey = Math.random().toString(36).substring(2, 10) + Math.random().toString(36).substring(2, 10);
             setGroupInfo({ ssid: 'Local Network', pass: '', ownerIp: ip });
             setConnected(true);
             setConnectionDetails({ type: 'hotspot', ssid: 'Local Network', ip: ip });
-            setQrData(JSON.stringify({ ssid: null, pass: null, ip: ip }));
-            startServer();
+            setQrData(JSON.stringify({ ssid: null, pass: null, ip: ip, key: secretKey }));
+            startServer(secretKey);
           } else {
             setStatus('error');
             Alert.alert("Connection Required", "Please connect to Wi-Fi to share files.");
@@ -125,16 +134,17 @@ const SharingScreen = ({ route, navigation }: any) => {
       }
     };
 
-  const startServer = () => {
+  const startServer = (secretKey?: string) => {
     TransferServer.start(8888, items, (serverStatus) => {
       if (serverStatus.type === 'client_connected') {
         navigation.replace('FileTransfer', {
           role: 'sender',
           deviceName: serverStatus.clientAddress,
-          initialFiles: items
+          initialFiles: items,
+          secretKey
         });
       }
-    });
+    }, secretKey);
     setStatus('ready');
   };
 

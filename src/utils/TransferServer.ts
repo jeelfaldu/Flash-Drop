@@ -2,6 +2,7 @@ import TcpSocket from 'react-native-tcp-socket';
 import RNFS from 'react-native-fs';
 import { Platform } from 'react-native';
 import { Buffer } from 'buffer';
+import CryptoJS from 'crypto-js';
 import { saveHistoryItem } from './HistoryService';
 import DiscoveryManager from './DiscoveryManager';
 
@@ -13,796 +14,382 @@ export type ServerStatus = {
     percent: number;
     sent: number;
     total: number;
+    speed?: number;    // bytes/sec
+    etaSecs?: number;
   };
   message?: string;
+};
+
+// ─── Wall-clock speed tracker ────────────────────────────────────────────────
+// Simple, accurate, same formula used on both sender and receiver so both
+// devices show the same number.
+class SpeedTracker {
+  private t0 = 0;
+  private b0 = 0;
+  private on = false;
+
+  begin(bytes: number) { this.t0 = Date.now(); this.b0 = bytes; this.on = true; }
+
+  sample(bytes: number, total: number): { speed: number; etaSecs: number } {
+    if (!this.on) return { speed: 0, etaSecs: 0 };
+    const dt = (Date.now() - this.t0) / 1000;
+    if (dt < 0.3) return { speed: 0, etaSecs: 0 };
+    const speed = Math.round((bytes - this.b0) / dt);
+    const remaining = total - bytes;
+    const etaSecs = speed > 0 && remaining > 0 ? Math.round(remaining / speed) : 0;
+    return { speed, etaSecs };
+  }
+
+  reset() { this.on = false; }
 }
 
 export class TransferServer {
-    server: any;
-    filesToSend: any[] = [];
+  server: any = null;
+  filesToSend: any[] = [];
   statusCallback?: (status: ServerStatus) => void;
+  private currentPort = 8888;
   private connectedClients = new Set<string>();
-  private currentPort: number = 8888;
-  // ── Xender-style bidirectional: peer device info ──
   private peerIp: string | null = null;
-  private peerServerPort: number = 8888;
+  private peerServerPort = 8888;
   private peerRegisteredCb?: (ip: string, port: number) => void;
-    
-  start(port = 8888, files: any[], onStatus?: (status: ServerStatus) => void) {
-    this.currentPort = port;
-    this.filesToSend = files;
-    // Only overwrite callback if caller explicitly provides one.
-    // startServer() from PCConnectionScreen passes no callback — preserve existing subscription.
-    if (onStatus !== undefined) {
-      this.statusCallback = onStatus;
+  private secretKey?: string;
+
+  // Active upload state
+  private upload = {
+    active: false,
+    finalized: false,
+    fileName: '',
+    fileSize: 0,
+    received: 0,
+    tempPath: '',
+    finalPath: '',
+    writeQueue: Promise.resolve() as Promise<void>,
+    tracker: new SpeedTracker(),
+  };
+
+  private readonly PAGE_B64 = 'PCFET0NUWVBFIGh0bWw+CjxodG1sIGxhbmc9ImVuIj4KPGhlYWQ+CjxtZXRhIGNoYXJzZXQ9IlVURi04Ij4KPG1ldGEgbmFtZT0idmlld3BvcnQiIGNvbnRlbnQ9IndpZHRoPWRldmljZS13aWR0aCwgaW5pdGlhbC1zY2FsZT0xLjAiPgo8dGl0bGU+Rmxhc2hEcm9wIC0gUEMgQ29ubmVjdDwvdGl0bGU+CjxsaW5rIGhyZWY9Imh0dHBzOi8vZm9udHMuZ29vZ2xlYXBpcy5jb20vY3NzMj9mYW1pbHk9T3V0Zml0OndnaHRAMzAwOzQwMDs2MDA7ODAwJmRpc3BsYXk9c3dhcCIgcmVsPSJzdHlsZXNoZWV0Ij4KPGxpbmsgcmVsPSJzdHlsZXNoZWV0IiBocmVmPSJodHRwczovL2NkbmpzLmNsb3VkZmxhcmUuY29tL2FqYXgvbGlicy9mb250LWF3ZXNvbWUvNi40LjAvY3NzL2FsbC5taW4uY3NzIj4KPHN0eWxlPgoqIHsgbWFyZ2luOiAwOyBwYWRkaW5nOiAwOyBib3gtc2l6aW5nOiBib3JkZXItYm94OyBmb250LWZhbWlseTogJ091dGZpdCcsIHNhbnMtc2VyaWY7IH0KOnJvb3QgeyAtLXByaW1hcnk6ICMyNTYzRUI7IC0tcHJpbWFyeS1kYXJrOiAjMUU0MEFGOyAtLWdyZWVuOiAjMTBCOTgxOyAtLWJnOiAjRjhGQUZDOyAtLXdoaXRlOiAjZmZmOyAtLXRleHQ6ICMxRTI5M0I7IC0tbXV0ZWQ6ICM2NDc0OEI7IC0tYm9yZGVyOiAjRTJFOEYwOyB9CmJvZHkgeyBiYWNrZ3JvdW5kOiB2YXIoLS1iZyk7IGNvbG9yOiB2YXIoLS10ZXh0KTsgbWluLWhlaWdodDogMTAwdmg7IGRpc3BsYXk6IGZsZXg7IGZsZXgtZGlyZWN0aW9uOiBjb2x1bW47IH0KaGVhZGVyIHsgYmFja2dyb3VuZDogdmFyKC0td2hpdGUpOyBwYWRkaW5nOiAxcmVtIDJyZW07IGRpc3BsYXk6IGZsZXg7IGp1c3RpZnktY29udGVudDogc3BhY2UtYmV0d2VlbjsgYWxpZ24taXRlbXM6IGNlbnRlcjsgYm94LXNoYWRvdzogMCAxcHggM3B4IHJnYmEoMCwwLDAsLjA2KTsgcG9zaXRpb246IHN0aWNreTsgdG9wOiAwOyB6LWluZGV4OiAxMDsgfQoubG9nbyB7IGZvbnQtc2l6ZTogMS40cmVtOyBmb250LXdlaWdodDogODAwOyBjb2xvcjogdmFyKC0tcHJpbWFyeSk7IGRpc3BsYXk6IGZsZXg7IGFsaWduLWl0ZW1zOiBjZW50ZXI7IGdhcDogLjVyZW07IH0KLmJhZGdlIHsgYmFja2dyb3VuZDogI0RDRkNFNzsgY29sb3I6ICMxNjY1MzQ7IHBhZGRpbmc6IC4yNXJlbSAuNzVyZW07IGJvcmRlci1yYWRpdXM6IDk5cHg7IGZvbnQtc2l6ZTogLjhyZW07IGZvbnQtd2VpZ2h0OiA2MDA7IGRpc3BsYXk6IGZsZXg7IGFsaWduLWl0ZW1zOiBjZW50ZXI7IGdhcDogLjRyZW07IH0KLmRvdCB7IHdpZHRoOiA3cHg7IGhlaWdodDogN3B4OyBiYWNrZ3JvdW5kOiAjMTZhMzRhOyBib3JkZXItcmFkaXVzOiA1MCU7IGFuaW1hdGlvbjogYmxpbmsgMS41cyBpbmZpbml0ZTsgfQpAa2V5ZnJhbWVzIGJsaW5rIHsgMCUsMTAwJXtvcGFjaXR5OjF9IDUwJXtvcGFjaXR5Oi4zfSB9Cm1haW4geyBmbGV4OiAxOyBwYWRkaW5nOiAycmVtOyBtYXgtd2lkdGg6IDExMDBweDsgbWFyZ2luOiAwIGF1dG87IHdpZHRoOiAxMDAlOyBkaXNwbGF5OiBncmlkOyBncmlkLXRlbXBsYXRlLWNvbHVtbnM6IDFmciAxZnI7IGdhcDogMS41cmVtOyB9Ci5jYXJkIHsgYmFja2dyb3VuZDogdmFyKC0td2hpdGUpOyBib3JkZXItcmFkaXVzOiAxLjI1cmVtOyBwYWRkaW5nOiAxLjc1cmVtOyBib3JkZXI6IDFweCBzb2xpZCB2YXIoLS1ib3JkZXIpOyBib3gtc2hhZG93OiAwIDJweCA4cHggcmdiYSgwLDAsMCwuMDQpOyB9Ci5jYXJkLXRpdGxlIHsgZm9udC1zaXplOiAxLjFyZW07IGZvbnQtd2VpZ2h0OiA3MDA7IG1hcmdpbi1ib3R0b206IC4yNXJlbTsgfQouY2FyZC1zdWIgeyBmb250LXNpemU6IC44NXJlbTsgY29sb3I6IHZhcigtLW11dGVkKTsgbWFyZ2luLWJvdHRvbTogMS4yNXJlbTsgfQouZHJvcHpvbmUgeyBib3JkZXI6IDJweCBkYXNoZWQgdmFyKC0tYm9yZGVyKTsgYm9yZGVyLXJhZGl1czogMXJlbTsgcGFkZGluZzogMi41cmVtIDFyZW07IHRleHQtYWxpZ246IGNlbnRlcjsgYmFja2dyb3VuZDogI0ZBRkFGQTsgY3Vyc29yOiBwb2ludGVyOyB0cmFuc2l0aW9uOiBhbGwgLjJzOyB9Ci5kcm9wem9uZS5vdmVyIHsgYm9yZGVyLWNvbG9yOiB2YXIoLS1wcmltYXJ5KTsgYmFja2dyb3VuZDogI0VGRjZGRjsgfQouZHotaWNvbiB7IGZvbnQtc2l6ZTogMi4ycmVtOyBjb2xvcjogdmFyKC0tbXV0ZWQpOyBtYXJnaW4tYm90dG9tOiAuNzVyZW07IH0KLmR6LXRpdGxlIHsgZm9udC13ZWlnaHQ6IDYwMDsgZm9udC1zaXplOiAuOTVyZW07IG1hcmdpbi1ib3R0b206IC4yNXJlbTsgfQouZHotc3ViIHsgZm9udC1zaXplOiAuOHJlbTsgY29sb3I6IHZhcigtLW11dGVkKTsgfQouYnRuIHsgYmFja2dyb3VuZDogdmFyKC0tcHJpbWFyeSk7IGNvbG9yOiAjZmZmOyBib3JkZXI6IG5vbmU7IHBhZGRpbmc6IC42cmVtIDEuMjVyZW07IGJvcmRlci1yYWRpdXM6IC42cmVtOyBmb250LXdlaWdodDogNjAwOyBmb250LXNpemU6IC44NXJlbTsgY3Vyc29yOiBwb2ludGVyOyB0cmFuc2l0aW9uOiBiYWNrZ3JvdW5kIC4yczsgZGlzcGxheTogaW5saW5lLWZsZXg7IGFsaWduLWl0ZW1zOiBjZW50ZXI7IGdhcDogLjRyZW07IH0KLmJ0bjpob3ZlciB7IGJhY2tncm91bmQ6IHZhcigtLXByaW1hcnktZGFyayk7IH0KLmJ0bi1vdXRsaW5lIHsgYmFja2dyb3VuZDogI2ZmZjsgY29sb3I6IHZhcigtLXRleHQpOyBib3JkZXI6IDFweCBzb2xpZCB2YXIoLS1ib3JkZXIpOyB9Ci5idG4tb3V0bGluZTpob3ZlciB7IGJhY2tncm91bmQ6ICNGMUY1Rjk7IH0KLnByb2ctbGlzdCB7IG1hcmdpbi10b3A6IDFyZW07IGRpc3BsYXk6IGZsZXg7IGZsZXgtZGlyZWN0aW9uOiBjb2x1bW47IGdhcDogLjZyZW07IH0KLnByb2ctaXRlbSB7IGJhY2tncm91bmQ6ICNGOEZBRkM7IGJvcmRlcjogMXB4IHNvbGlkIHZhcigtLWJvcmRlcik7IGJvcmRlci1yYWRpdXM6IC43NXJlbTsgcGFkZGluZzogLjc1cmVtOyB9Ci5wcm9nLW5hbWUgeyBmb250LXNpemU6IC44MnJlbTsgZm9udC13ZWlnaHQ6IDYwMDsgbWFyZ2luLWJvdHRvbTogLjRyZW07IHdoaXRlLXNwYWNlOiBub3dyYXA7IG92ZXJmbG93OiBoaWRkZW47IHRleHQtb3ZlcmZsb3c6IGVsbGlwc2lzOyB9Ci5wcm9nLXRyYWNrIHsgYmFja2dyb3VuZDogI0UyRThGMDsgYm9yZGVyLXJhZGl1czogOTlweDsgaGVpZ2h0OiA2cHg7IG92ZXJmbG93OiBoaWRkZW47IH0KLnByb2ctZmlsbCB7IGhlaWdodDogMTAwJTsgYmFja2dyb3VuZDogdmFyKC0tcHJpbWFyeSk7IGJvcmRlci1yYWRpdXM6IDk5cHg7IHdpZHRoOiAwJTsgdHJhbnNpdGlvbjogd2lkdGggLjNzOyB9Ci5wcm9nLWZpbGwuZG9uZSB7IGJhY2tncm91bmQ6IHZhcigtLWdyZWVuKTsgfQoucHJvZy1tZXRhIHsgZGlzcGxheTogZmxleDsganVzdGlmeS1jb250ZW50OiBzcGFjZS1iZXR3ZWVuOyBmb250LXNpemU6IC43NXJlbTsgY29sb3I6IHZhcigtLW11dGVkKTsgbWFyZ2luLXRvcDogLjNyZW07IH0KLmZpbGUtbGlzdCB7IGRpc3BsYXk6IGZsZXg7IGZsZXgtZGlyZWN0aW9uOiBjb2x1bW47IGdhcDogLjZyZW07IH0KLmZpbGUtaXRlbSB7IGRpc3BsYXk6IGZsZXg7IGFsaWduLWl0ZW1zOiBjZW50ZXI7IGdhcDogLjc1cmVtOyBwYWRkaW5nOiAuNzVyZW07IGJvcmRlcjogMXB4IHNvbGlkIHZhcigtLWJvcmRlcik7IGJvcmRlci1yYWRpdXM6IC43NXJlbTsgfQouZmlsZS1pY29uIHsgd2lkdGg6IDIuMnJlbTsgaGVpZ2h0OiAyLjJyZW07IGJhY2tncm91bmQ6ICNFRkY2RkY7IGNvbG9yOiB2YXIoLS1wcmltYXJ5KTsgYm9yZGVyLXJhZGl1czogLjVyZW07IGRpc3BsYXk6IGZsZXg7IGFsaWduLWl0ZW1zOiBjZW50ZXI7IGp1c3RpZnktY29udGVudDogY2VudGVyOyBmb250LXNpemU6IC45cmVtOyBmbGV4LXNocmluazogMDsgfQouZmlsZS1pbmZvIHsgZmxleDogMTsgbWluLXdpZHRoOiAwOyB9Ci5maWxlLW5hbWUgeyBmb250LXdlaWdodDogNjAwOyBmb250LXNpemU6IC44NXJlbTsgd2hpdGUtc3BhY2U6IG5vd3JhcDsgb3ZlcmZsb3c6IGhpZGRlbjsgdGV4dC1vdmVyZmxvdzogZWxsaXBzaXM7IH0KLmZpbGUtc2l6ZSB7IGZvbnQtc2l6ZTogLjc1cmVtOyBjb2xvcjogdmFyKC0tbXV0ZWQpOyB9Ci5lbXB0eSB7IHRleHQtYWxpZ246IGNlbnRlcjsgcGFkZGluZzogMi41cmVtIDFyZW07IGNvbG9yOiB2YXIoLS1tdXRlZCk7IH0KLmVtcHR5IGkgeyBmb250LXNpemU6IDJyZW07IG9wYWNpdHk6IC4zOyBkaXNwbGF5OiBibG9jazsgbWFyZ2luLWJvdHRvbTogLjVyZW07IH0KQG1lZGlhIChtYXgtd2lkdGg6IDcwMHB4KSB7IG1haW4geyBncmlkLXRlbXBsYXRlLWNvbHVtbnM6IDFmcjsgcGFkZGluZzogMXJlbTsgfSB9Cjwvc3R5bGU+CjwvaGVhZD4KPGJvZHk+CjxoZWFkZXI+CiAgPGRpdiBjbGFzcz0ibG9nbyI+PGkgY2xhc3M9ImZhLXNvbGlkIGZhLWJvbHQiPjwvaT4gRmxhc2hEcm9wPC9kaXY+CiAgPGRpdiBjbGFzcz0iYmFkZ2UiPjxzcGFuIGNsYXNzPSJkb3QiPjwvc3Bhbj4gQ29ubmVjdGVkPC9kaXY+CjwvaGVhZGVyPgo8bWFpbj4KICA8c2VjdGlvbiBjbGFzcz0iY2FyZCI+CiAgICA8ZGl2IGNsYXNzPSJjYXJkLXRpdGxlIj5TZW5kIHRvIFBob25lPC9kaXY+CiAgICA8ZGl2IGNsYXNzPSJjYXJkLXN1YiI+U2VsZWN0IG9yIGRyYWcgZmlsZXMgdG8gdHJhbnNmZXIgdG8geW91ciBtb2JpbGUgZGV2aWNlPC9kaXY+CiAgICA8ZGl2IGNsYXNzPSJkcm9wem9uZSIgaWQ9ImRyb3B6b25lIj4KICAgICAgPGRpdiBjbGFzcz0iZHotaWNvbiI+PGkgY2xhc3M9ImZhLXNvbGlkIGZhLWNsb3VkLWFycm93LXVwIj48L2k+PC9kaXY+CiAgICAgIDxkaXYgY2xhc3M9ImR6LXRpdGxlIj5Ecm9wIGZpbGVzIGhlcmU8L2Rpdj4KICAgICAgPGRpdiBjbGFzcz0iZHotc3ViIiBzdHlsZT0ibWFyZ2luLWJvdHRvbTouNzVyZW0iPm9yIGNsaWNrIHRoZSBidXR0b24gYmVsb3c8L2Rpdj4KICAgICAgPGJ1dHRvbiBjbGFzcz0iYnRuIiBpZD0ic2VsZWN0QnRuIj48aSBjbGFzcz0iZmEtc29saWQgZmEtZm9sZGVyLW9wZW4iPjwvaT4gU2VsZWN0IEZpbGVzPC9idXR0b24+CiAgICAgIDxpbnB1dCB0eXBlPSJmaWxlIiBpZD0iZmlsZUlucHV0IiBtdWx0aXBsZSBoaWRkZW4+CiAgICA8L2Rpdj4KICAgIDxkaXYgY2xhc3M9InByb2ctbGlzdCIgaWQ9InByb2dMaXN0Ij48L2Rpdj4KICA8L3NlY3Rpb24+CiAgPHNlY3Rpb24gY2xhc3M9ImNhcmQiPgogICAgPGRpdiBjbGFzcz0iY2FyZC10aXRsZSI+UmVjZWl2ZSBmcm9tIFBob25lPC9kaXY+CiAgICA8ZGl2IGNsYXNzPSJjYXJkLXN1YiI+RmlsZXMgc2hhcmVkIGZyb20geW91ciBwaG9uZSBhcHBlYXIgaGVyZSBmb3IgZG93bmxvYWQ8L2Rpdj4KICAgIDxkaXYgY2xhc3M9ImZpbGUtbGlzdCIgaWQ9ImZpbGVMaXN0Ij4KICAgICAgPGRpdiBjbGFzcz0iZW1wdHkiPjxpIGNsYXNzPSJmYS1yZWd1bGFyIGZhLWZvbGRlci1vcGVuIj48L2k+Tm8gZmlsZXMgc2hhcmVkIHlldDwvZGl2PgogICAgPC9kaXY+CiAgPC9zZWN0aW9uPgo8L21haW4+CjxzY3JpcHQ+CihmdW5jdGlvbiAoKSB7CiAgdmFyIGRyb3B6b25lICAgPSBkb2N1bWVudC5nZXRFbGVtZW50QnlJZCgnZHJvcHpvbmUnKTsKICB2YXIgZmlsZUlucHV0ICA9IGRvY3VtZW50LmdldEVsZW1lbnRCeUlkKCdmaWxlSW5wdXQnKTsKICB2YXIgc2VsZWN0QnRuICA9IGRvY3VtZW50LmdldEVsZW1lbnRCeUlkKCdzZWxlY3RCdG4nKTsKICB2YXIgcHJvZ0xpc3QgICA9IGRvY3VtZW50LmdldEVsZW1lbnRCeUlkKCdwcm9nTGlzdCcpOwogIHZhciBmaWxlTGlzdEVsID0gZG9jdW1lbnQuZ2V0RWxlbWVudEJ5SWQoJ2ZpbGVMaXN0Jyk7CiAgc2VsZWN0QnRuLmFkZEV2ZW50TGlzdGVuZXIoJ2NsaWNrJywgZnVuY3Rpb24gKGUpIHsgZS5zdG9wUHJvcGFnYXRpb24oKTsgZmlsZUlucHV0LmNsaWNrKCk7IH0pOwogIGZpbGVJbnB1dC5hZGRFdmVudExpc3RlbmVyKCdjaGFuZ2UnLCBmdW5jdGlvbiAoKSB7IHN0YXJ0VXBsb2FkcyhmaWxlSW5wdXQuZmlsZXMpOyBmaWxlSW5wdXQudmFsdWUgPSAnJzsgfSk7CiAgZHJvcHpvbmUuYWRkRXZlbnRMaXN0ZW5lcignY2xpY2snLCBmdW5jdGlvbiAoKSB7IGZpbGVJbnB1dC5jbGljaygpOyB9KTsKICBkcm9wem9uZS5hZGRFdmVudExpc3RlbmVyKCdkcmFnb3ZlcicsIGZ1bmN0aW9uIChlKSB7IGUucHJldmVudERlZmF1bHQoKTsgZHJvcHpvbmUuY2xhc3NMaXN0LmFkZCgnb3ZlcicpOyB9KTsKICBkcm9wem9uZS5hZGRFdmVudExpc3RlbmVyKCdkcmFnbGVhdmUnLCBmdW5jdGlvbiAoKSB7IGRyb3B6b25lLmNsYXNzTGlzdC5yZW1vdmUoJ292ZXInKTsgfSk7CiAgZHJvcHpvbmUuYWRkRXZlbnRMaXN0ZW5lcignZHJvcCcsIGZ1bmN0aW9uIChlKSB7IGUucHJldmVudERlZmF1bHQoKTsgZHJvcHpvbmUuY2xhc3NMaXN0LnJlbW92ZSgnb3ZlcicpOyBzdGFydFVwbG9hZHMoZS5kYXRhVHJhbnNmZXIuZmlsZXMpOyB9KTsKICB2YXIgdXBsb2FkUXVldWUgPSBbXSwgdXBsb2FkaW5nID0gZmFsc2U7CiAgZnVuY3Rpb24gc3RhcnRVcGxvYWRzKGZpbGVzKSB7IGZvciAodmFyIGkgPSAwOyBpIDwgZmlsZXMubGVuZ3RoOyBpKyspIHsgdXBsb2FkUXVldWUucHVzaChmaWxlc1tpXSk7IGNyZWF0ZVByb2dSb3coZmlsZXNbaV0ubmFtZSwgZmlsZXNbaV0uc2l6ZSk7IH0gaWYgKCF1cGxvYWRpbmcpIHByb2Nlc3NRdWV1ZSgpOyB9CiAgYXN5bmMgZnVuY3Rpb24gcHJvY2Vzc1F1ZXVlKCkgeyBpZiAoIXVwbG9hZFF1ZXVlLmxlbmd0aCkgeyB1cGxvYWRpbmcgPSBmYWxzZTsgcmV0dXJuOyB9IHVwbG9hZGluZyA9IHRydWU7IHZhciBmaWxlID0gdXBsb2FkUXVldWUuc2hpZnQoKTsgYXdhaXQgdXBsb2FkRmlsZShmaWxlKTsgcHJvY2Vzc1F1ZXVlKCk7IH0KICBhc3luYyBmdW5jdGlvbiB1cGxvYWRGaWxlKGZpbGUpIHsKICAgIHZhciB0b3RhbCA9IGZpbGUuc2l6ZSwgb2Zmc2V0ID0gMDsKICAgIHZhciBDSFVOS19TSVpFID0gOCAqIDEwMjQgKiAxMDI0OyAvLyA4TUIgY2h1bmtzIGZvciBtYXggdGhyb3VnaHB1dAogICAgc2V0UHJvZ3Jlc3MoZmlsZS5uYW1lLCAwLCAwLCB0b3RhbCk7CiAgICB3aGlsZSAob2Zmc2V0IDwgdG90YWwpIHsKICAgICAgdmFyIGVuZCA9IE1hdGgubWluKG9mZnNldCArIENIVU5LX1NJWkUsIHRvdGFsKTsKICAgICAgdmFyIGlzTGFzdCA9IChlbmQgPj0gdG90YWwpID8gMSA6IDA7CiAgICAgIHZhciBibG9iID0gZmlsZS5zbGljZShvZmZzZXQsIGVuZCk7CiAgICAgIHZhciB1cmwgPSAnL2FwaS91cGxvYWQ/bmFtZT0nICsgZW5jb2RlVVJJQ29tcG9uZW50KGZpbGUubmFtZSkgKyAnJnNpemU9JyArIHRvdGFsICsgJyZvZmZzZXQ9JyArIG9mZnNldCArICcmbGFzdD0nICsgaXNMYXN0OwogICAgICB2YXIgb2sgPSBhd2FpdCBzZW5kQ2h1bmsodXJsLCBibG9iLCBmaWxlLm5hbWUsIG9mZnNldCwgdG90YWwpOwogICAgICBpZiAoIW9rKSB7IHNldEVycm9yKGZpbGUubmFtZSk7IHJldHVybjsgfQogICAgICBvZmZzZXQgPSBlbmQ7CiAgICAgIHNldFByb2dyZXNzKGZpbGUubmFtZSwgaXNMYXN0ID8gMTAwIDogTWF0aC5mbG9vcigob2Zmc2V0IC8gdG90YWwpICogMTAwKSwgb2Zmc2V0LCB0b3RhbCk7CiAgICB9CiAgfQogIGZ1bmN0aW9uIHNlbmRDaHVuayh1cmwsIGJsb2IsIG5hbWUsIGN1cnJlbnRPZmZzZXQsIHRvdGFsU2l6ZSkgewogICAgcmV0dXJuIG5ldyBQcm9taXNlKGZ1bmN0aW9uIChyZXNvbHZlKSB7CiAgICAgIHZhciB4aHIgPSBuZXcgWE1MSHR0cFJlcXVlc3QoKTsgeGhyLnRpbWVvdXQgPSAwOwogICAgICB4aHIudXBsb2FkLmFkZEV2ZW50TGlzdGVuZXIoJ3Byb2dyZXNzJywgZnVuY3Rpb24oZSkgeyBpZiAoZS5sZW5ndGhDb21wdXRhYmxlKSB7IHZhciBzID0gY3VycmVudE9mZnNldCArIGUubG9hZGVkOyBzZXRQcm9ncmVzcyhuYW1lLCBNYXRoLmZsb29yKHMgLyB0b3RhbFNpemUgKiAxMDApLCBzLCB0b3RhbFNpemUpOyB9IH0pOwogICAgICB4aHIub25sb2FkID0gZnVuY3Rpb24oKSB7IHJlc29sdmUoeGhyLnN0YXR1cyA9PT0gMjAwKTsgfTsgeGhyLm9uZXJyb3IgPSBmdW5jdGlvbigpIHsgcmVzb2x2ZShmYWxzZSk7IH07IHhoci5vbnRpbWVvdXQgPSBmdW5jdGlvbigpIHsgcmVzb2x2ZShmYWxzZSk7IH07CiAgICAgIHhoci5vcGVuKCdQT1NUJywgdXJsKTsgeGhyLnNlbmQoYmxvYik7CiAgICB9KTsKICB9CiAgZnVuY3Rpb24gY3JlYXRlUHJvZ1JvdyhuYW1lLCB0b3RhbEJ5dGVzKSB7IHZhciBpZCA9IHJvd0lkKG5hbWUpOyBpZiAoZG9jdW1lbnQuZ2V0RWxlbWVudEJ5SWQoaWQpKSByZXR1cm47IHZhciByb3cgPSBkb2N1bWVudC5jcmVhdGVFbGVtZW50KCdkaXYnKTsgcm93LmlkID0gaWQ7IHJvdy5jbGFzc05hbWUgPSAncHJvZy1pdGVtJzsgcm93LmlubmVySFRNTCA9ICc8ZGl2IGNsYXNzPSJwcm9nLW5hbWUiIHRpdGxlPSInICsgZXNjKG5hbWUpICsgJyI+JyArIGVzYyhuYW1lKSArICc8L2Rpdj48ZGl2IGNsYXNzPSJwcm9nLXRyYWNrIj48ZGl2IGNsYXNzPSJwcm9nLWZpbGwiIGlkPSInICsgaWQgKyAnX2YiPjwvZGl2PjwvZGl2PjxkaXYgY2xhc3M9InByb2ctbWV0YSI+PHNwYW4gaWQ9IicgKyBpZCArICdfcCI+MCU8L3NwYW4+PHNwYW4gaWQ9IicgKyBpZCArICdfc2kiPjAgLyAnICsgZm10KHRvdGFsQnl0ZXMpICsgJzwvc3Bhbj48L2Rpdj4nOyBwcm9nTGlzdC5hcHBlbmRDaGlsZChyb3cpOyB9CiAgZnVuY3Rpb24gc2V0UHJvZ3Jlc3MobmFtZSwgcGN0LCBzZW50LCB0b3RhbCkgeyB2YXIgaWQgPSByb3dJZChuYW1lKTsgdmFyIGZpbGwgPSBkb2N1bWVudC5nZXRFbGVtZW50QnlJZChpZCArICdfZicpOyB2YXIgcGN0RWwgPSBkb2N1bWVudC5nZXRFbGVtZW50QnlJZChpZCArICdfcCcpOyB2YXIgc2l6ZUVsID0gZG9jdW1lbnQuZ2V0RWxlbWVudEJ5SWQoaWQgKyAnX3NpJyk7IGlmIChmaWxsKSB7IGZpbGwuc3R5bGUud2lkdGggPSBwY3QgKyAnJSc7IGlmIChwY3QgPj0gMTAwKSBmaWxsLmNsYXNzTGlzdC5hZGQoJ2RvbmUnKTsgfSBpZiAocGN0RWwpIHBjdEVsLnRleHRDb250ZW50ID0gcGN0ID49IDEwMCA/ICdEb25lIScgOiBwY3QgKyAnJSc7IGlmIChzaXplRWwpIHNpemVFbC50ZXh0Q29udGVudCA9IGZtdChzZW50KSArICcgLyAgJyArIGZtdCh0b3RhbCk7IH0KICBmdW5jdGlvbiBzZXRFcnJvcihuYW1lKSB7IHZhciBpZCA9IHJvd0lkKG5hbWUpOyB2YXIgZiA9IGRvY3VtZW50LmdldEVsZW1lbnRCeUlkKGlkICsgJ19mJyk7IHZhciBwID0gZG9jdW1lbnQuZ2V0RWxlbWVudEJ5SWQoaWQgKyAnX3AnKTsgaWYgKGYpIGYuc3R5bGUuYmFja2dyb3VuZCA9ICcjRUY0NDQ0JzsgaWYgKHApIHAudGV4dENvbnRlbnQgPSAnRmFpbGVkJzsgfQogIGZ1bmN0aW9uIHJvd0lkKG4pIHsgcmV0dXJuICdyb3dfJyArIG4ucmVwbGFjZSgvW15hLXpBLVowLTldL2csICdfJyk7IH0KICBmdW5jdGlvbiBlc2MocykgeyByZXR1cm4gcy5yZXBsYWNlKC8mL2csJyZhbXA7JykucmVwbGFjZSgvPC9nLCcmbHQ7JykucmVwbGFjZSgvPi9nLCcmZ3Q7JykucmVwbGFjZSgvIi9nLCcmcXVvdDsnKTsgfQogIGFzeW5jIGZ1bmN0aW9uIGxvYWRGaWxlcygpIHsgdHJ5IHsgdmFyIHJlcyA9IGF3YWl0IGZldGNoKCcvYXBpL2ZpbGVzJyk7IHZhciBmaWxlcyA9IGF3YWl0IHJlcy5qc29uKCk7IGZpbGVMaXN0RWwuaW5uZXJIVE1MID0gJyc7IGlmICghZmlsZXMubGVuZ3RoKSB7IGZpbGVMaXN0RWwuaW5uZXJIVE1MID0gJzxkaXYgY2xhc3M9ImVtcHR5Ij48aSBjbGFzcz0iZmEtcmVndWxhciBmYS1mb2xkZXItb3BlbiI+PC9pPk5vIGZpbGVzIHNoYXJlZCB5ZXQ8L2Rpdj4nOyByZXR1cm47IH0gZmlsZXMuZm9yRWFjaChmdW5jdGlvbihmKSB7IHZhciBpdGVtID0gZG9jdW1lbnQuY3JlYXRlRWxlbWVudCgnZGl2Jyk7IGl0ZW0uY2xhc3NOYW1lID0gJ2ZpbGUtaXRlbSc7IGl0ZW0uaW5uZXJIVE1MID0gJzxkaXYgY2xhc3M9ImZpbGUtaWNvbiI+PGkgY2xhc3M9ImZhLXNvbGlkIGZhLWZpbGUiPjwvaT48L2Rpdj48ZGl2IGNsYXNzPSJmaWxlLWluZm8iPjxkaXYgY2xhc3M9ImZpbGUtbmFtZSIgdGl0bGU9IicgKyBlc2MoZi5uYW1lKSArICciPicgKyBlc2MoZi5uYW1lKSArICc8L2Rpdj48ZGl2IGNsYXNzPSJmaWxlLXNpemUiPicgKyBmbXQoZi5zaXplKSArICc8L2Rpdj48L2Rpdj48YSBocmVmPSIvYXBpL2Rvd25sb2FkP25hbWU9JyArIGVuY29kZVVSSUNvbXBvbmVudChmLm5hbWUpICsgJyIgY2xhc3M9ImJ0biBidG4tb3V0bGluZSIgc3R5bGU9InRleHQtZGVjb3JhdGlvbjpub25lO3BhZGRpbmc6LjVyZW0gLjc1cmVtIj48aSBjbGFzcz0iZmEtc29saWQgZmEtZG93bmxvYWQiPjwvaT48L2E+JzsgZmlsZUxpc3RFbC5hcHBlbmRDaGlsZChpdGVtKTsgfSk7IH0gY2F0Y2goZSkge30gfQogIGZ1bmN0aW9uIGZtdChiKSB7IGlmICh0eXBlb2YgYiAhPT0gJ251bWJlcicgfHwgIWIpIHJldHVybiAnMCBCJzsgdmFyIGsgPSAxMDI0LCB1ID0gWydCJywnS0InLCdNQicsJ0dCJ10sIGkgPSBNYXRoLmZsb29yKE1hdGgubG9nKGIpL01hdGgubG9nKGspKTsgcmV0dXJuIChiL01hdGgucG93KGssaSkpLnRvRml4ZWQoaT8xOjApKycgJyt1W2ldOyB9CiAgbG9hZEZpbGVzKCk7IHNldEludGVydmFsKGxvYWRGaWxlcywgNDAwMCk7Cn0pKCk7Cjwvc2NyaXB0PjwvYm9keT48L2h0bWw+';
+
+  private getPage() { return Buffer.from(this.PAGE_B64, 'base64').toString('utf-8'); }
+
+  private async saveToDownloads(tempPath: string, finalPath: string, fileName: string) {
+    const dir = Platform.OS === 'android' ? RNFS.DownloadDirectoryPath : RNFS.DocumentDirectoryPath;
+    let dest = finalPath;
+    if (await RNFS.exists(dest)) {
+      try { await RNFS.unlink(dest); } catch (_) {
+        const dot = fileName.lastIndexOf('.');
+        dest = `${dir}/${dot > 0 ? fileName.slice(0, dot) : fileName}_${Date.now()}${dot > 0 ? fileName.slice(dot) : ''}`;
+      }
     }
+    // moveFile = atomic rename — zero-copy, no double-write
+    await RNFS.moveFile(tempPath, dest);
+    return dest;
+  }
 
-    if (this.server) {
-      console.log(`[TransferServer] Server already running on 0.0.0.0:${port}, updating handlers.`);
-      return { port };
-    }
+  private emitProgress(name: string, sent: number, total: number, type: 'upload_progress' | 'progress', tracker: SpeedTracker) {
+    if (!this.statusCallback) return;
+    const percent = total > 0 ? Math.min(Math.round((sent / total) * 100), 100) : 0;
+    const { speed, etaSecs } = tracker.sample(sent, total);
+    this.statusCallback({ type, fileProgress: { name, percent, sent, total, speed, etaSecs } });
+  }
 
-    console.log(`[TransferServer] Starting on 0.0.0.0:${port}`);
-        
-        this.server = TcpSocket.createServer((socket) => {
-          const address: any = socket.address();
-          const clientIp = typeof address === 'string' ? address : address.address;
-          console.log('[TransferServer] Client connected from:', clientIp);
+  // ─── Core pipe: reads file in 4MB chunks, writes raw binary to socket ────────
+  // NO base64 kept in memory after decode. NO setTimeout yields.
+  // Blocks on TCP drain ONLY when the kernel send-buffer is actually full.
+  private async pipeToSocket(
+    socket: any,
+    readPath: string,
+    fileSize: number,
+    startByte: number,
+    endByte: number,
+    label: string,
+    tracker: SpeedTracker,
+    encrypted = false,
+  ) {
+    const CHUNK = encrypted ? 256 * 1024 : 4 * 1024 * 1024;
+    let offset = startByte;
+    let lastReport = startByte;
+    tracker.begin(startByte);
 
-          // Upload state for this connection
-          // NOTE: lastProgressTime added for time-based throttling
-          let uploadState: {
-            receiving: boolean;
-            fileName: string;
-            fileSize: number;
-            receivedBytes: number;
-            filePath: string;
-            writePromise: Promise<void>;
-            lastProgressTime: number;
-          } = {
-            receiving: false,
-            fileName: '',
-            fileSize: 0,
-            receivedBytes: 0,
-            filePath: '',
-            writePromise: Promise.resolve(),
-            lastProgressTime: 0,
-          };
+    while (offset <= endByte && !socket.destroyed) {
+      const cs = Math.min(CHUNK, endByte - offset + 1);
+      const b64 = await RNFS.read(readPath, cs, offset, 'base64');
 
-          // ─────────────────────────────────────────────────────────────────────
-          // appendBufferSafe:
-          //   Split large received buffer into 256 KB slices.
-          //   ⚑ KEY FIX: base64 encoding is INSIDE the .then() so it runs
-          //     one chunk per event-loop tick — not 200 synchronous calls at once.
-          //     This prevents JS-thread stalls for large files (50+ MB).
-          // ─────────────────────────────────────────────────────────────────────
-          const appendBufferSafe = (buf: Buffer, filePath: string, currentPromise: Promise<void>): Promise<void> => {
-            const SUB_CHUNK = 256 * 1024;
-            let promise = currentPromise;
-            let chunkIdx = 0;
-            for (let off = 0; off < buf.length; off += SUB_CHUNK) {
-              const start = off;
-              const end = Math.min(off + SUB_CHUNK, buf.length);
-              const yieldTick = (chunkIdx % 8 === 7); // yield to event loop every 8 chunks (~2 MB)
-              chunkIdx++;
-              promise = promise.then(() => {
-                // Encoding deferred — runs one chunk at a time as promises resolve
-                const slice = buf.slice(start, end);
-                const b64 = slice.toString('base64');
-                const write = RNFS.appendFile(filePath, b64, 'base64');
-                if (yieldTick) {
-                  // Yield to event loop so UI animations & touches remain responsive
-                  return write.then(() => new Promise<void>(res => setTimeout(res, 0)));
-                }
-                return write;
-              });
-            }
-            return promise;
-          };
+      let data: Buffer;
+      if (encrypted) {
+        const key = CryptoJS.SHA256(this.secretKey!);
+        const iv = CryptoJS.enc.Hex.parse(key.toString().substring(0, 32));
+        data = Buffer.from(CryptoJS.AES.encrypt(b64, key, { iv }).toString(), 'base64');
+      } else {
+        // Decode base64 → raw bytes in one call — fastest path
+        data = Buffer.from(b64, 'base64');
+      }
 
-          // Helper: throttled progress update (max once every 500 ms)
-          const reportProgress = (name: string, received: number, total: number, force = false) => {
-            if (!this.statusCallback) return;
-            const now = Date.now();
-            if (!force && now - uploadState.lastProgressTime < 500) return;
-            uploadState.lastProgressTime = now;
-            const percent = total > 0 ? Math.min(Math.round((received / total) * 100), 99) : 0;
-            this.statusCallback({
-              type: 'upload_progress',
-              fileProgress: { name, percent, sent: received, total },
-            });
-          };
+      if (socket.destroyed) break;
 
-          if (this.statusCallback && !this.connectedClients.has(clientIp)) {
-            this.connectedClients.add(clientIp);
-            this.statusCallback({
-              type: 'client_connected',
-              clientAddress: clientIp
-            });
-          }
+      const canContinue = socket.write(data);
+      offset += cs;
 
-          socket.on('data', async (data) => {
-              if (uploadState.receiving) {
-                uploadState.receivedBytes += data.length;
-
-                // ── Safe write: split into 256KB sub-chunks to avoid JS thread blocking ──
-                uploadState.writePromise = appendBufferSafe(Buffer.from(data), uploadState.filePath, uploadState.writePromise);
-
-                // ── Time-based progress (max every 500ms) ──
-                reportProgress(uploadState.fileName, uploadState.receivedBytes, uploadState.fileSize);
-
-                if (uploadState.receivedBytes >= uploadState.fileSize) {
-                  uploadState.receiving = false;
-                  await uploadState.writePromise;
-                  console.log(`[TransferServer] ✅ File received: ${uploadState.fileName}`);
-
-                  // Force final 100% progress
-                  if (this.statusCallback) {
-                    this.statusCallback({
-                      type: 'upload_progress',
-                      fileProgress: { name: uploadState.fileName, percent: 100, sent: uploadState.fileSize, total: uploadState.fileSize },
-                    });
-                  }
-
-                  if (this.statusCallback) {
-                    this.statusCallback({ type: 'complete', message: `Received ${uploadState.fileName}` });
-                  }
-
-                  const res = 'HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\nContent-Length: 0\r\n\r\n';
-                  socket.write(res, 'utf8', () => socket.end());
-
-                  saveHistoryItem({
-                    fileName: uploadState.fileName,
-                    fileSize: uploadState.fileSize,
-                    type: 'unknown',
-                    role: 'received',
-                    status: 'success',
-                  });
-                }
-                return;
-              }
-
-
-              const msg = data.toString(); // Peek at data as string
-
-              // ── Check Upload Status: GET /api/upload/check ──────────────────────
-              // Browser uses this before uploading to know if a partial file exists
-              // Response: { received: N }  where N = bytes already on disk (0 = fresh)
-              if (msg.startsWith('GET /api/upload/check')) {
-                const nameMatch = msg.match(/name=([^&\s]+)/);
-                if (nameMatch) {
-                  const fileName = decodeURIComponent(nameMatch[1]);
-                  const destPath = (Platform.OS === 'android' ? RNFS.DownloadDirectoryPath : RNFS.DocumentDirectoryPath) + '/' + fileName;
-                  let receivedBytes = 0;
-                  try {
-                    if (await RNFS.exists(destPath)) {
-                      const stat = await RNFS.stat(destPath);
-                      receivedBytes = stat.size;
-                    }
-                  } catch (_) { }
-                  const json = JSON.stringify({ received: receivedBytes });
-                  socket.write(
-                    `HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: ${json.length}\r\nConnection: close\r\n\r\n${json}`,
-                    'utf8', () => socket.end()
-                  );
-                  return;
-                }
-              }
-
-              // Handle Upload Request: POST /api/upload
-              if (msg.startsWith('POST /api/upload')) {
-                // Parse Query Params for name and size
-                const nameMatch = msg.match(/name=([^&\s]+)/);
-                const sizeMatch = msg.match(/size=([^&\s]+)/);
-
-                if (nameMatch && sizeMatch) {
-                  const fileName = decodeURIComponent(nameMatch[1]);
-                  const fileSize = parseInt(sizeMatch[1]);
-                  const destPath = (Platform.OS === 'android' ? RNFS.DownloadDirectoryPath : RNFS.DocumentDirectoryPath) + '/' + fileName;
-
-                  // ── Parse Content-Range for resume support ────────────────
-                  // Browser sends: Content-Range: bytes N-END/TOTAL when resuming
-                  const rangeMatch = msg.match(/Content-Range:\s*bytes\s*(\d+)-/i);
-                  const uploadOffset = rangeMatch ? parseInt(rangeMatch[1], 10) : 0;
-                  const isResume = uploadOffset > 0;
-
-                  console.log(`[TransferServer] ${isResume ? '\u23e9 Resuming' : 'Receiving'} upload: ${fileName} (${fileSize} bytes, offset: ${uploadOffset})`);
-
-                  // Initialize upload state
-                  uploadState = {
-                    receiving: true,
-                    fileName: fileName,
-                    fileSize: fileSize,
-                    receivedBytes: uploadOffset,
-                    filePath: destPath,
-                    lastProgressTime: 0,
-                    writePromise: isResume
-                      ? Promise.resolve()
-                      : RNFS.writeFile(destPath, '', 'utf8')
-                  };
-
-                  // Fire immediate 0% progress so UI shows instantly
-                  reportProgress(fileName, uploadOffset, fileSize, true);
-
-                  // Find body start
-                  const bodyStartIndex = msg.indexOf('\r\n\r\n');
-                  if (bodyStartIndex !== -1) {
-                    const headerSize = bodyStartIndex + 4;
-                    const bodyBuffer = data.slice(headerSize);
-
-                    if (bodyBuffer.length > 0) {
-                      uploadState.receivedBytes += bodyBuffer.length;
-                      // ── Safe sub-chunk write for initial body ──
-                      uploadState.writePromise = appendBufferSafe(Buffer.from(bodyBuffer), uploadState.filePath, uploadState.writePromise);
-                      reportProgress(uploadState.fileName, uploadState.receivedBytes, uploadState.fileSize);
-                    }
-
-                    // Check if completed in one chunk
-                    if (uploadState.receivedBytes >= uploadState.fileSize) {
-                      uploadState.receiving = false;
-                      await uploadState.writePromise;
-                      console.log(`[TransferServer] ✅ File received (single chunk): ${uploadState.fileName}`);
-                      if (this.statusCallback) {
-                        this.statusCallback({
-                          type: 'upload_progress',
-                          fileProgress: { name: uploadState.fileName, percent: 100, sent: uploadState.fileSize, total: uploadState.fileSize },
-                        });
-                        this.statusCallback({ type: 'complete', message: `Received ${uploadState.fileName}` });
-                      }
-                      const res = 'HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\nContent-Length: 0\r\n\r\n';
-                      socket.write(res, 'utf8', () => socket.end());
-                      saveHistoryItem({
-                        fileName: uploadState.fileName,
-                        fileSize: uploadState.fileSize,
-                        type: 'unknown',
-                        role: 'received',
-                        status: 'success',
-                      });
-                    }
-                  }
-                  return;
-                }
-              }
-
-            // ── Peer Registration: GET /api/register (Xender-style) ──────────
-            // Receiver calls this after connecting so sender knows receiver's IP
-            if (msg.startsWith('GET /api/register')) {
-              try {
-                const urlParts = msg.split(' ')[1] || ''; // /api/register?port=...
-                const matchPort = urlParts.match(/port=([0-9]+)/);
-
-                // CRITICAL FIX: Always use socket.remoteAddress to get the true, reachable IP of the receiver!
-                // Do not rely on DeviceInfo.getIpAddress() from the receiver because it might report a cellular IP.
-                this.peerIp = socket.remoteAddress || null;
-                this.peerServerPort = matchPort ? parseInt(matchPort[1], 10) : 8888;
-
-                console.log(`[TransferServer] ✅ Peer registered: ${this.peerIp}:${this.peerServerPort}`);
-                if (this.peerRegisteredCb && this.peerIp) {
-                  this.peerRegisteredCb(this.peerIp, this.peerServerPort);
-                }
-              } catch (e) {
-                console.warn('[TransferServer] /api/register parse error:', e);
-              }
-              const regRes = 'HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK';
-              socket.write(regRes, 'utf8', () => socket.end());
-              return;
-            }
-
-              // Handle HTTP Request (Browser)
-              if (msg.startsWith('GET') || msg.includes('HTTP/1.1')) {
-                // Check if specific API endpoints are requested first
-                if (msg.startsWith('GET /api/files')) {
-                  const fileList = this.filesToSend.map(f => ({
-                    name: f.name,
-                    size: f.size, 
-                    type: f.type,
-                    uri: f.uri 
-                  }));
-                  const json = JSON.stringify(fileList);
-                  const response = `HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${json.length}\r\nConnection: close\r\n\r\n${json}`;
-                  socket.write(response, 'utf8', () => socket.end());
-                  return;
-                }
-
-                if (msg.startsWith('GET /api/download')) {
-                  const match = msg.match(/name=([^&\s]+)/);
-                  if (match && match[1]) {
-                    const fileName = decodeURIComponent(match[1]);
-                    const file = this.filesToSend.find(f => f.name === fileName);
-
-                    if (file) {
-                      console.log(`[TransferServer] Serving file via HTTP: ${fileName}`);
-                      let fileSize = 0;
-                      let readPath = file.uri;
-                      let isTempFileHttp = false;
-
-                      try {
-                        if (typeof file.rawSize === 'number') fileSize = file.rawSize;
-                        else if (typeof file.size === 'number') fileSize = file.size;
-                        if (fileSize === 0) {
-                          const stat = await RNFS.stat(file.uri);
-                          fileSize = stat.size;
-                        }
-                      } catch (e) { console.error('Stat error', e); }
-
-                      // ── Android content:// URI → copy to temp dir ──
-                      if (Platform.OS === 'android' && file.uri.startsWith('content://')) {
-                        const tempPath = `${RNFS.CachesDirectoryPath}/http_${file.name}_${Date.now()}`;
-                        try {
-                          await RNFS.copyFile(file.uri, tempPath);
-                          readPath = tempPath;
-                          isTempFileHttp = true;
-                        } catch (e) {
-                          console.error('[TransferServer] HTTP temp copy failed', e);
-                        }
-                      }
-
-                      // ── Parse Range header (for resume support) ──
-                      const rangeMatch = msg.match(/Range:\s*bytes=(\d+)-/i);
-                      const startByte = rangeMatch ? parseInt(rangeMatch[1], 10) : 0;
-                      const isRangeRequest = startByte > 0;
-                      const contentLength = fileSize - startByte;
-
-                      // ── Choose dynamic chunk size ──
-                      // Large files → bigger chunks = fewer read() calls = faster
-                      const chunkSize = fileSize > 100 * 1024 * 1024
-                        ? 512 * 1024   // 512 KB for >100MB
-                        : fileSize > 10 * 1024 * 1024
-                          ? 256 * 1024 // 256 KB for 10-100MB
-                          : 64 * 1024; // 64 KB for <10MB
-
-                      const statusLine = isRangeRequest
-                        ? `HTTP/1.1 206 Partial Content\r\n`
-                        : `HTTP/1.1 200 OK\r\n`;
-
-                      let responseHeaders = statusLine +
-                        `Content-Type: application/octet-stream\r\n` +
-                        `Content-Disposition: attachment; filename="${fileName}"\r\n` +
-                        `Content-Length: ${contentLength}\r\n` +
-                        `Accept-Ranges: bytes\r\n`;
-
-                      if (isRangeRequest) {
-                        responseHeaders += `Content-Range: bytes ${startByte}-${fileSize - 1}/${fileSize}\r\n`;
-                      }
-                      responseHeaders += `Connection: close\r\n\r\n`;
-
-                      socket.write(responseHeaders, 'utf8');
-                      console.log(`[TransferServer] HTTP Serving: ${fileName} from byte ${startByte} (${isRangeRequest ? 'RESUME' : 'FULL'})`);
-
-                      try {
-                        let offset = startByte;
-                        let lastReportedPercent = -1;
-                        while (offset < fileSize && !socket.destroyed) {
-                          const currentChunkSize = Math.min(chunkSize, fileSize - offset);
-                          const chunkBase64 = await RNFS.read(readPath, currentChunkSize, offset, 'base64');
-                          const buffer = Buffer.from(chunkBase64, 'base64');
-
-                          // ── Backpressure: wait for drain if buffer is full ──
-                          const canWrite = socket.write(buffer);
-                          if (!canWrite) {
-                            await new Promise<void>(resolve => {
-                              const tId = setTimeout(() => {
-                                socket.removeListener('drain', onDrain);
-                                resolve();
-                              }, 150);
-                              const onDrain = () => {
-                                clearTimeout(tId);
-                                resolve();
-                              };
-                              socket.once('drain', onDrain);
-                            });
-                          }
-
-                          offset += buffer.length;
-
-                          // ── Progress reporting (keeps sender UI synced) ──
-                          const currentPercent = Math.floor((offset / fileSize) * 100);
-                          if (this.statusCallback && (currentPercent >= lastReportedPercent + 2 || offset >= fileSize)) {
-                            lastReportedPercent = currentPercent;
-                            this.statusCallback({
-                              type: 'progress',
-                              fileProgress: { name: fileName, percent: currentPercent, sent: offset, total: fileSize }
-                            });
-                          }
-                        }
-                        console.log(`[TransferServer] HTTP File sent: ${fileName}`);
-                      } catch (e) {
-                        console.error('HTTP Send error', e);
-                      } finally {
-                        if (isTempFileHttp && await RNFS.exists(readPath)) {
-                          RNFS.unlink(readPath).catch(() => { });
-                        }
-                        socket.end();
-                      }
-                      return;
-                    }
-                  }
-                  const notFound = "File not found";
-                  socket.write(`HTTP/1.1 404 Not Found\r\nContent-Length: ${notFound.length}\r\nAccept-Ranges: bytes\r\n\r\n${notFound}`);
-                  socket.end();
-                  return;
-                }
-
-                // Default: Serve HTML
-                const html = `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FlashDrop - PC Connect</title>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <style>
-        :root { --primary: #2563EB; --primary-dark: #1E40AF; --secondary: #10B981; --bg: #F8FAFC; --surface: #FFFFFF; --text: #1E293B; --text-light: #64748B; --border: #E2E8F0; }
-        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Outfit', sans-serif; }
-        body { background-color: var(--bg); color: var(--text); min-height: 100vh; display: flex; flex-direction: column; }
-        header { background: var(--surface); padding: 1rem 2rem; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 1px 3px rgba(0,0,0,0.05); position: sticky; top: 0; z-index: 10; }
-        .logo { font-size: 1.5rem; font-weight: 800; color: var(--primary); display: flex; align-items: center; gap: 0.5rem; }
-        .badge { background: #DCFCE7; color: #166534; padding: 0.25rem 0.75rem; border-radius: 99px; font-size: 0.875rem; font-weight: 600; display: flex; align-items: center; gap: 0.25rem; }
-        .badge::before { content: ''; width: 6px; height: 6px; background: #166534; border-radius: 50%; display: block; animation: pulse 2s infinite; }
-        main { flex: 1; padding: 2rem; max-width: 1200px; margin: 0 auto; width: 100%; display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; align-items: start; }
-        .card { background: var(--surface); border-radius: 1.5rem; padding: 2rem; border: 1px solid var(--border); box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05); transition: transform 0.2s; height: 100%; }
-        .card:hover { transform: translateY(-2px); box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.05); }
-        .card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 2rem; }
-        .icon-box { width: 3rem; height: 3rem; border-radius: 1rem; display: flex; align-items: center; justify-content: center; font-size: 1.25rem; }
-        .icon-send { background: #EFF6FF; color: var(--primary); }
-        .icon-receive { background: #ECFDF5; color: var(--secondary); }
-        h2 { font-size: 1.5rem; font-weight: 700; margin-bottom: 0.5rem; }
-        p { color: var(--text-light); line-height: 1.5; }
-        .dropzone { border: 2px dashed var(--border); border-radius: 1rem; padding: 3rem 1rem; text-align: center; background: #FAFAFA; transition: all 0.2s; cursor: pointer; margin-top: 1.5rem; }
-        .dropzone:hover { border-color: var(--primary); background: #EFF6FF; }
-        .drop-icon { font-size: 2.5rem; color: var(--text-light); margin-bottom: 1rem; }
-        .btn { background: var(--primary); color: white; border: none; padding: 0.75rem 1.5rem; border-radius: 0.75rem; font-weight: 600; cursor: pointer; margin-top: 1rem; transition: background 0.2s; }
-        .btn:hover { background: var(--primary-dark); }
-        .btn-secondary { background: white; border: 1px solid var(--border); color: var(--text); }
-        .btn-secondary:hover { background: #F8FAFC; border-color: #CBD5E1; }
-        .file-list { margin-top: 1.5rem; display: flex; flex-direction: column; gap: 0.75rem; }
-        .file-item { display: flex; align-items: center; padding: 0.75rem; border: 1px solid var(--border); border-radius: 0.75rem; }
-        .file-icon { width: 2.5rem; height: 2.5rem; background: #F1F5F9; border-radius: 0.5rem; display: flex; align-items: center; justify-content: center; margin-right: 1rem; color: var(--text-light); }
-        .file-info { flex: 1; }
-        .file-name { font-weight: 600; font-size: 0.9rem; margin-bottom: 0.1rem; }
-        .file-size { font-size: 0.75rem; color: var(--text-light); }
-        .empty-state { text-align: center; padding: 2rem; color: var(--text-light); }
-        @media (max-width: 768px) { main { grid-template-columns: 1fr; padding: 1rem; } .card { margin-bottom: 1rem; } }
-        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
-    </style>
-</head>
-<body>
-    <header>
-        <div class="logo"><i class="fa-solid fa-bolt"></i> FlashDrop</div>
-        <div class="badge">Connected</div>
-    </header>
-    <main>
-        <section class="card">
-            <div class="card-header">
-                <div><h2>Send to Phone</h2><p>Drag files here to send them to your mobile device instantly.</p></div>
-                <div class="icon-box icon-send"><i class="fa-solid fa-paper-plane"></i></div>
-            </div>
-            <div class="dropzone" id="dropzone">
-                <div class="drop-icon"><i class="fa-solid fa-cloud-arrow-up"></i></div>
-                <h3>Drop files here</h3>
-                <p style="font-size: 0.875rem; margin-top: 0.5rem;">or click to browse</p>
-                <button class="btn" onclick="document.getElementById('fileInput').click()">Select Files</button>
-                <input type="file" id="fileInput" hidden multiple onchange="handleFileSelect(event)">
-            </div>
-        </section>
-        <section class="card">
-            <div class="card-header">
-                <div><h2>Receive from Phone</h2><p>Files sent from your mobile device will appear here.</p></div>
-                <div class="icon-box icon-receive"><i class="fa-solid fa-download"></i></div>
-            </div>
-            <div class="file-list" id="fileList">
-                <div class="empty-state">
-                    <i class="fa-regular fa-folder-open" style="font-size: 2rem; margin-bottom: 0.5rem; opacity: 0.3;"></i>
-                    <p>No files shared yet</p>
-                    <p style="font-size: 0.75rem;">Send files from your phone to see them here</p>
-                </div>
-            </div>
-        </section>
-    </main>
-    <script>
-        const dropzone = document.getElementById('dropzone');
-        const fileListEl = document.getElementById('fileList');
-
-        async function loadFiles() {
-            try {
-                const response = await fetch('/api/files');
-                const files = await response.json();
-                renderFiles(files);
-            } catch (e) { console.error('Error loading files:', e); }
-        }
-
-        function renderFiles(files) {
-            fileListEl.innerHTML = '';
-            if (files.length === 0) {
-                fileListEl.innerHTML = \`
-                    <div class="empty-state">
-                        <i class="fa-regular fa-folder-open" style="font-size: 2rem; margin-bottom: 0.5rem; opacity: 0.3;"></i>
-                        <p>No files shared yet</p>
-                        <p style="font-size: 0.75rem;">Send files from your phone to see them here</p>
-                    </div>\`;
-                return;
-            }
-
-            files.forEach(file => {
-                const sizeStr = formatSize(file.size);
-                const item = document.createElement('div');
-                item.className = 'file-item';
-                item.innerHTML = \`
-                    <div class="file-icon"><i class="fa-solid fa-file"></i></div>
-                    <div class="file-info">
-                        <div class="file-name">\${file.name}</div>
-                        <div class="file-size">\${sizeStr}</div>
-                    </div>
-                    <a href="/api/download?name=\${encodeURIComponent(file.name)}" class="btn btn-secondary" style="padding: 0.5rem; text-decoration: none; display: inline-block;">
-                        <i class="fa-solid fa-download"></i>
-                    </a>\`;
-                fileListEl.appendChild(item);
-            });
-        }
-
-        function formatSize(bytes) {
-            if(typeof bytes !== 'number') return bytes || 'Unknown';
-            if (bytes === 0) return '0 Bytes';
-            const k = 1024;
-            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-            const i = Math.floor(Math.log(bytes) / Math.log(k));
-            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-        }
-
-        async function handleFileSelect(event) {
-            const files = event.target.files;
-            if (!files.length) return;
-            let allOk = true;
-            for (let i = 0; i < files.length; i++) {
-                const ok = await uploadFile(files[i]);
-                if (!ok) allOk = false;
-            }
-            if (allOk) alert('Files uploaded successfully!');
-        }
-
-        async function uploadFile(file) {
-            try {
-                // ── Check if server already has a partial copy ──
-                const checkRes = await fetch(\`/api/upload/check?name=\${encodeURIComponent(file.name)}\`);
-                const { received } = checkRes.ok ? await checkRes.json() : { received: 0 };
-
-                const isResume = received > 0 && received < file.size;
-                const startByte = isResume ? received : 0;
-                const blob = file.slice(startByte); // send only remaining bytes
-
-                const url = \`/api/upload?name=\${encodeURIComponent(file.name)}&size=\${file.size}\`;
-                const headers = {};
-                if (isResume) {
-                    headers['Content-Range'] = \`bytes \${startByte}-\${file.size - 1}/\${file.size}\`;
-                    console.log(\`Resuming \${file.name} from byte \${startByte}\`);
-                }
-
-                await fetch(url, { method: 'POST', body: blob, headers });
-                return true;
-            } catch (e) {
-                console.error('Upload failed', e);
-                alert('Failed to upload ' + file.name);
-                return false;
-            }
-        }
-
-        loadFiles();
-        setInterval(loadFiles, 5000);
-
-        dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.style.borderColor = 'var(--primary)'; dropzone.style.background = '#EFF6FF'; });
-        dropzone.addEventListener('dragleave', (e) => { e.preventDefault(); dropzone.style.borderColor = 'var(--border)'; dropzone.style.background = '#FAFAFA'; });
-        dropzone.addEventListener('drop', (e) => {
-            e.preventDefault();
-            dropzone.style.borderColor = 'var(--border)';
-            dropzone.style.background = '#FAFAFA';
-
-            const files = e.dataTransfer.files;
-            if (files.length) {
-                handleFileSelect({ target: { files: files } });
-            }
+      // Wait for drain ONLY if TCP send-buffer full — does NOT add artificial delay
+      if (!canContinue && !socket.destroyed) {
+        await new Promise<void>(resolve => {
+          const onDrain = () => { clearTimeout(guard); resolve(); };
+          const guard = setTimeout(() => { socket.removeListener('drain', onDrain); resolve(); }, 15000);
+          socket.once('drain', onDrain);
         });
-    </script>
-</body>
-</html>
-`;
-                const response = `HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: ${html.length}\r\nConnection: close\r\n\r\n${html}`;
-
-                console.log('[TransferServer] Sending HTTP response...');
-                socket.write(response, 'utf8', (err: any) => {
-                  if (err) console.error('[TransferServer] Write error:', err);
-                  console.log('[TransferServer] Closing connection.');
-                  socket.end();
-                });
-                return;
-                }
-            });
-
-            socket.on('error', (error) => {
-                console.log('Server Socket Error:', error);
-              if (this.statusCallback) {
-                this.statusCallback({ type: 'error', message: error.message });
-              }
-            });
-        }).listen({ port, host: '0.0.0.0' }, () => {
-            console.log('Transfer Server running on port', port);
-          // ── Publish mDNS so receivers can find us without hardcoded IPs ──
-          DiscoveryManager.publishService(port);
-        });
-        
-        return { port };
-    }
-
-  updateFiles(newFiles: any[]) {
-    newFiles.forEach(nf => {
-      const exists = this.filesToSend.find(f => f.name === nf.name && f.uri === nf.uri);
-      if (!exists) {
-        this.filesToSend.push(nf);
-      }
-    });
-    console.log(`[TransferServer] Files updated. Total: ${this.filesToSend.length}`);
-    }
-
-  async sendFile(socket: any, fileName: string, startOffset = 0) {
-    if (!socket || socket.destroyed) return;
-
-    const normalizedRequestedName = fileName.trim().toLowerCase();
-    const file = this.filesToSend.find(f =>
-      f.name.trim().toLowerCase() === normalizedRequestedName
-    );
-
-    if (!file) {
-      console.log(`[TransferServer] File not found. Requested: "${fileName}". Available:`,
-        this.filesToSend.map(f => f.name).join(', '));
-      return;
-    }
-
-    try {
-      console.log(`[TransferServer] Sending file: ${file.name} from offset: ${startOffset}`);
-
-      let fileSize = 0;
-      if (typeof file.rawSize === 'number') fileSize = file.rawSize;
-      else if (typeof file.size === 'number') fileSize = file.size;
-      if (fileSize === 0) {
-        try { const stat = await RNFS.stat(file.uri); fileSize = stat.size; } catch (_) { }
       }
 
-      // ── Dynamic chunk size based on file size ──────────────────────────────
-      // Larger chunks = fewer async read() calls = higher throughput for big files
-      const chunkSize = fileSize > 100 * 1024 * 1024
-        ? 512 * 1024   // 512 KB for >100 MB files
-        : fileSize > 10 * 1024 * 1024
-          ? 256 * 1024 // 256 KB for 10–100 MB files
-          : 64 * 1024; // 64 KB  for <10 MB files
-
-      let offset = startOffset;
-      let readPath = file.uri;
-      let isTempFile = false;
-      let lastReportedPercent = -1;
-
-      // ── Android content:// URI → copy to temp cache ────────────────────────
-      if (Platform.OS === 'android' && file.uri.startsWith('content://')) {
-        const tempPath = `${RNFS.CachesDirectoryPath}/send_${file.name}_${Date.now()}`;
-        try {
-          await RNFS.copyFile(file.uri, tempPath);
-          readPath = tempPath;
-          isTempFile = true;
-        } catch (e) {
-          console.error('[TransferServer] Temp copy failed', e);
-          throw e;
-        }
+      // Emit progress every 512KB so UI bar moves smoothly
+      if (offset - lastReport >= 512 * 1024 || offset > endByte) {
+        lastReport = offset;
+        this.emitProgress(label, offset, fileSize, 'progress', tracker);
       }
-
-      try {
-        while (offset < fileSize && !socket.destroyed) {
-          const remaining = fileSize - offset;
-          const currentChunkSize = Math.min(chunkSize, remaining);
-          const chunkBase64 = await RNFS.read(readPath, currentChunkSize, offset, 'base64');
-          const buffer = Buffer.from(chunkBase64, 'base64');
-
-          if (socket.destroyed) break;
-
-          // ── Backpressure: pause reads when socket buffer is full ──────────
-          const canWrite = socket.write(buffer);
-          if (!canWrite) {
-            await new Promise<void>(resolve => {
-              const tId = setTimeout(() => {
-                socket.removeListener('drain', onDrain);
-                resolve();
-              }, 150);
-              const onDrain = () => {
-                clearTimeout(tId);
-                resolve();
-              };
-              socket.once('drain', onDrain);
-            });
-          }
-
-          offset += buffer.length;
-
-          // ── Progress reporting every 2% to reduce Zustand churn ──────────
-          const currentPercent = Math.floor((offset / fileSize) * 100);
-          if (this.statusCallback && (currentPercent >= lastReportedPercent + 2 || offset >= fileSize)) {
-            lastReportedPercent = currentPercent;
-            this.statusCallback({
-              type: 'progress',
-              fileProgress: { name: file.name, percent: currentPercent, sent: offset, total: fileSize }
-            });
-          }
-        }
-
-        if (offset >= fileSize) {
-          console.log(`[TransferServer] ✅ Sent ${fileName} (${fileSize} bytes)`);
-          saveHistoryItem({
-            fileName: file.name,
-            fileSize,
-            type: file.type || 'unknown',
-            role: 'sent',
-            status: 'success'
-          });
-        }
-      } finally {
-        if (isTempFile && await RNFS.exists(readPath)) {
-          await RNFS.unlink(readPath).catch(() => { });
-        }
-      }
-    } catch (e: any) {
-      console.error('[TransferServer] Send failed:', e);
-      if (this.statusCallback) this.statusCallback({ type: 'error', message: e.message });
     }
   }
 
-    stop() {
-        if (this.server) {
-            this.server.close(); 
-            this.server = null;
+  start(port = 8888, files: any[] = [], onStatus?: (status: ServerStatus) => void, secretKey?: string) {
+    this.currentPort = port;
+    this.filesToSend = files;
+    if (onStatus !== undefined) this.statusCallback = onStatus;
+    this.secretKey = secretKey;
+    if (this.server) return { port };
+
+    this.server = TcpSocket.createServer((socket: any) => {
+      try { socket.setKeepAlive(true); } catch (_) { }   // no delay param — RN tcp-socket ignores it
+      try { socket.setNoDelay(true); } catch (_) { }
+
+      const addr: any = socket.address();
+      const clientIp = typeof addr === 'string' ? addr : (addr?.address ?? 'unknown');
+      if (!this.connectedClients.has(clientIp)) {
+        this.connectedClients.add(clientIp);
+        this.statusCallback?.({ type: 'client_connected', clientAddress: clientIp });
+      }
+
+      // HTTP parser — accumulates TCP chunks until a full request is ready
+      let rxBufs: Buffer[] = [];
+      let rxLen = 0;
+      const SEP = Buffer.from('\r\n\r\n');
+      let chain = Promise.resolve();
+
+      socket.on('data', (raw: Buffer | string) => {
+        const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw as string, 'binary');
+        rxBufs.push(chunk); rxLen += chunk.length;
+        parse();
+      });
+
+      const parse = () => {
+        if (socket.destroyed) return;
+        // Consolidate buffers into one for indexOf scanning
+        const buf = rxBufs.length > 1 ? (() => { const b = Buffer.concat(rxBufs, rxLen); rxBufs = [b]; return b; })() : (rxBufs[0] || Buffer.alloc(0));
+        const hEnd = buf.indexOf(SEP);
+        if (hEnd === -1) return;
+        const headerStr = buf.slice(0, hEnd).toString('utf8');
+        const cl = headerStr.match(/Content-Length:\s*(\d+)/i);
+        const bodyLen = cl ? parseInt(cl[1]) : 0;
+        const totalLen = hEnd + 4 + bodyLen;
+        if (rxLen < totalLen) return;
+        const body = buf.slice(hEnd + 4, totalLen);
+        const rest = buf.slice(totalLen);
+        rxBufs = rest.length ? [rest] : []; rxLen = rest.length;
+        chain = chain.then(() => handle(headerStr, body)).catch(e => console.error('[Server] error:', e));
+        if (rxLen > 0) parse(); // handle pipelining
+      };
+
+      const handle = async (headers: string, body: Buffer) => {
+        const fl = headers.split('\r\n')[0];
+        const [method, rawPath] = fl.split(' ');
+        const qi = rawPath.indexOf('?');
+        const path = qi >= 0 ? rawPath.slice(0, qi) : rawPath;
+        const qs = qi >= 0 ? rawPath.slice(qi + 1) : '';
+        const p: Record<string, string> = {};
+        qs.split('&').forEach(s => { const e = s.indexOf('='); if (e > 0) p[decodeURIComponent(s.slice(0, e))] = decodeURIComponent(s.slice(e + 1).replace(/\+/g, ' ')); });
+
+        // ── POST /api/upload ─────────────────────────────────────────────
+        if (method === 'POST' && path === '/api/upload') {
+          const fileName = p['name'] ?? '';
+          const fileSize = parseInt(p['size'] ?? '0');
+          const offset = parseInt(p['offset'] ?? '0');
+          const isLast = p['last'] === '1';
+          if (!fileName || !fileSize) { res(400, 'Bad Request'); return; }
+
+          const tempPath = `${RNFS.CachesDirectoryPath}/up_${encodeURIComponent(fileName)}`;
+          const finalPath = `${Platform.OS === 'android' ? RNFS.DownloadDirectoryPath : RNFS.DocumentDirectoryPath}/${fileName}`;
+
+          if (offset === 0) {
+            try { await RNFS.unlink(tempPath); } catch (_) { }
+            await RNFS.writeFile(tempPath, '', 'utf8').catch(() => { });
+            this.upload = { active: true, finalized: false, fileName, fileSize, received: 0, tempPath, finalPath, writeQueue: Promise.resolve(), tracker: new SpeedTracker() };
+            this.upload.tracker.begin(0);
+          }
+
+          if (body.length > 0) {
+            if (offset === 0) this.upload.received = 0;
+            this.upload.received += body.length;
+            const snap = { received: this.upload.received, data: body };
+            // Enqueue disk write — TCP receive loop is NOT blocked by disk I/O
+            this.upload.writeQueue = this.upload.writeQueue.then(async () => {
+              await RNFS.appendFile(tempPath, snap.data.toString('base64'), 'base64');
+              this.emitProgress(fileName, snap.received, fileSize, 'upload_progress', this.upload.tracker);
+            }).catch(() => { });
+          }
+
+          res(200, 'OK');
+
+          if ((isLast || this.upload.received >= fileSize) && !this.upload.finalized) {
+            this.upload.finalized = true; this.upload.active = false;
+            await this.upload.writeQueue; // ensure all chunks written before move
+            try { await this.saveToDownloads(tempPath, finalPath, fileName); } catch (_) { }
+            this.statusCallback?.({ type: 'upload_progress', fileProgress: { name: fileName, percent: 100, sent: fileSize, total: fileSize, speed: 0, etaSecs: 0 } });
+            this.statusCallback?.({ type: 'complete', message: `Received ${fileName}` });
+            saveHistoryItem({ fileName, fileSize, type: 'unknown', role: 'received', status: 'success' });
+          }
+          return;
         }
-      this.connectedClients.clear();
-      // Reset peer info on disconnect
-      this.peerIp = null;
-      this.peerServerPort = 8888;
-      this.peerRegisteredCb = undefined;
-    // ── Unpublish mDNS so stale services don't linger ──
+
+        // ── GET /api/files ─────────────────────────────────────────────────
+        if (method === 'GET' && path === '/api/files') {
+          resJSON(this.filesToSend.map(f => ({ name: f.name, size: f.size, type: f.type }))); return;
+        }
+
+        // ── GET /api/download ──────────────────────────────────────────────
+        if (method === 'GET' && path === '/api/download') {
+          const fileName = p['name'] ?? '';
+          const file = this.filesToSend.find(f => f.name === fileName);
+          if (!file) { res(404, 'Not Found'); return; }
+
+          let fileSize = (file.rawSize ?? file.size ?? 0) as number;
+          let readPath = file.uri as string;
+          let isTmp = false;
+
+          // Always stat the file to get the real byte count.
+          // file.size from the metadata list can be stale or rounded.
+          try {
+            const realSize = (await RNFS.stat(readPath)).size;
+            if (realSize > 0) fileSize = realSize;
+          } catch (_) { }
+
+          if (Platform.OS === 'android' && readPath.startsWith('content://')) {
+            const tp = `${RNFS.CachesDirectoryPath}/dl_${Date.now()}_${file.name}`;
+            try { await RNFS.copyFile(readPath, tp); readPath = tp; isTmp = true; } catch (_) { }
+          }
+
+          const rm = headers.match(/Range:\s*bytes=(\d+)-(\d+)?/i);
+          let startByte = 0, endByte = fileSize - 1;
+          const partial = !!rm && !this.secretKey;
+          if (partial) { startByte = parseInt(rm[1]); if (rm[2]) endByte = parseInt(rm[2]); }
+
+          const sendLen = endByte - startByte + 1;
+          let hdrs = partial
+            ? `HTTP/1.1 206 Partial Content\r\nContent-Range: bytes ${startByte}-${endByte}/${fileSize}\r\n`
+            : `HTTP/1.1 200 OK\r\n`;
+          hdrs += `Content-Type: application/octet-stream\r\nContent-Disposition: attachment; filename="${fileName}"\r\nContent-Length: ${sendLen}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n`;
+
+          if (socket.destroyed) return;
+          try { socket.write(hdrs, 'utf8'); } catch (_) { socket.destroy(); return; }
+
+          const tracker = new SpeedTracker();
+          try {
+            await this.pipeToSocket(socket, readPath, fileSize, startByte, endByte, fileName, tracker, !!this.secretKey);
+          } finally {
+            if (isTmp) RNFS.unlink(readPath).catch(() => { });
+            if (!socket.destroyed) socket.end();
+          }
+          return;
+        }
+
+        // ── GET /api/register ──────────────────────────────────────────────
+        if (method === 'GET' && path === '/api/register') {
+          this.peerIp = socket.remoteAddress ?? null;
+          this.peerServerPort = parseInt(p['port'] ?? '8888');
+          if (this.peerRegisteredCb && this.peerIp) this.peerRegisteredCb(this.peerIp, this.peerServerPort);
+          resText('OK'); return;
+        }
+
+        // ── GET / — web UI ─────────────────────────────────────────────────
+        if (method === 'GET' && path === '/') {
+          const html = this.getPage();
+          const h = `HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ${Buffer.byteLength(html, 'utf8')}\r\nConnection: close\r\n\r\n${html}`;
+          if (!socket.destroyed) try { socket.write(h, 'utf8', () => socket.end()); } catch (_) { socket.destroy(); }
+          return;
+        }
+
+        res(404, 'Not Found');
+      };
+
+      const res = (code: number, msg: string) => {
+        if (socket.destroyed) return;
+        const body = code === 200 ? '' : msg;
+        const h = `HTTP/1.1 ${code} ${msg}\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n${body}`;
+        try { socket.write(h, 'utf8', () => { if (!socket.destroyed) socket.end(); }); } catch (_) { socket.destroy(); }
+      };
+      const resJSON = (data: any) => {
+        if (socket.destroyed) return;
+        const json = JSON.stringify(data);
+        const h = `HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: ${json.length}\r\nConnection: close\r\n\r\n${json}`;
+        try { socket.write(h, 'utf8', () => socket.end()); } catch (_) { socket.destroy(); }
+      };
+      const resText = (text: string) => {
+        if (socket.destroyed) return;
+        const h = `HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: ${text.length}\r\nConnection: close\r\n\r\n${text}`;
+        try { socket.write(h, 'utf8', () => socket.end()); } catch (_) { socket.destroy(); }
+      };
+
+      socket.on('error', () => { this.statusCallback?.({ type: 'error', message: 'Socket Error' }); });
+
+    }).listen({ port, host: '0.0.0.0' }, () => { DiscoveryManager.publishService(port); });
+
+    return { port };
+  }
+
+  // sendFile — Xender-style direct push (not HTTP pull)
+  async sendFile(socket: any, fileName: string, startOffset = 0) {
+    if (!socket || socket.destroyed) return;
+    const file = this.filesToSend.find(f => f.name.trim().toLowerCase() === fileName.trim().toLowerCase());
+    if (!file) return;
+    try {
+      let fileSize = (file.rawSize ?? file.size ?? 0) as number;
+      if (!fileSize) try { fileSize = (await RNFS.stat(file.uri)).size; } catch (_) { }
+      let readPath = file.uri as string;
+      let isTmp = false;
+      if (Platform.OS === 'android' && readPath.startsWith('content://')) {
+        const tp = `${RNFS.CachesDirectoryPath}/send_${Date.now()}_${file.name}`;
+        try { await RNFS.copyFile(readPath, tp); readPath = tp; isTmp = true; } catch (e) { throw e; }
+      }
+      const tracker = new SpeedTracker();
+      try {
+        await this.pipeToSocket(socket, readPath, fileSize, startOffset, fileSize - 1, file.name, tracker, !!this.secretKey);
+        saveHistoryItem({ fileName: file.name, fileSize, type: file.type ?? 'unknown', role: 'sent', status: 'success' });
+      } finally {
+        if (isTmp) RNFS.unlink(readPath).catch(() => { });
+      }
+    } catch (e: any) {
+      this.statusCallback?.({ type: 'error', message: e.message });
+    }
+  }
+
+  updateFiles(newFiles: any[]) {
+    newFiles.forEach(nf => { if (!this.filesToSend.find(f => f.name === nf.name && f.uri === nf.uri)) this.filesToSend.push(nf); });
+  }
+
+  stop() {
+    if (this.server) { this.server.close(); this.server = null; }
+    this.connectedClients.clear(); this.peerIp = null;
     DiscoveryManager.stopPublishing();
   }
 
-  getPort() {
-    return this.currentPort;
-  }
-
-  // ── Xender-style: register callback for when peer connects back ──
-  onPeerRegistered(cb?: (ip: string, port: number) => void) {
-    this.peerRegisteredCb = cb;
-  }
-
-  getPeerInfo(): { ip: string | null; port: number } {
-    return { ip: this.peerIp, port: this.peerServerPort };
-  }
+  getPort() { return this.currentPort; }
+  onPeerRegistered(cb?: (ip: string, port: number) => void) { this.peerRegisteredCb = cb; }
+  getPeerInfo() { return { ip: this.peerIp, port: this.peerServerPort }; }
 }
 
 const TransferServerInstance = new TransferServer();
-
-export const startServer = async (port = 8888) => {
-  return TransferServerInstance.start(port, []);
-};
-
-export const stopServer = () => {
-  TransferServerInstance.stop();
-};
-
-export const generateServerUrl = async () => {
+export const startServer = (port = 8888) => TransferServerInstance.start(port, []);
+export const stopServer = () => TransferServerInstance.stop();
+export const generateServerUrl = async (): Promise<string> => {
   try {
     const DeviceInfo = require('react-native-device-info');
     const ip = await DeviceInfo.getIpAddress();
-    const port = TransferServerInstance.getPort();
-    if (ip && ip !== '0.0.0.0') {
-      return `http://${ip}:${port}`;
-    }
-  } catch (e) {
-    console.log('Error getting IP via DeviceInfo', e);
-  }
+    if (ip && ip !== '0.0.0.0') return `http://${ip}:${TransferServerInstance.getPort()}`;
+  } catch (_) { }
   return `http://localhost:${TransferServerInstance.getPort()}`;
 };
-
 export default TransferServerInstance;

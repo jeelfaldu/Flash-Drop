@@ -1,420 +1,322 @@
 import { Platform } from 'react-native';
-import TcpSocket from 'react-native-tcp-socket';
 import RNFS from 'react-native-fs';
 import { Buffer } from 'buffer';
 import DeviceInfo from 'react-native-device-info';
+import CryptoJS from 'crypto-js';
 import { saveHistoryItem } from './HistoryService';
 import DiscoveryManager from './DiscoveryManager';
 
 export type TransferStatus = {
-    type: 'log' | 'progress' | 'complete' | 'connection';
-    message?: string;
-    fileProgress?: {
-        name: string;
-        percent: number;
-        received: number;
-        total: number;
-    };
-    connected: boolean;
-    files?: any[];
+  type: 'log' | 'progress' | 'complete' | 'connection';
+  message?: string;
+  fileProgress?: {
+    name: string;
+    percent: number;
+    received: number;
+    total: number;
+    speed?: number;    // bytes/sec — wall-clock
+    etaSecs?: number;
+  };
+  connected: boolean;
+  files?: any[];
+};
+
+// ─── Wall-clock speed tracker — same formula as TransferServer ────────────────
+// Both sides use identical math → same speed/ETA shown on both devices.
+class SpeedTracker {
+  private t0 = 0;
+  private b0 = 0;
+  private on = false;
+
+  begin(bytes: number) { this.t0 = Date.now(); this.b0 = bytes; this.on = true; }
+
+  sample(bytes: number, total: number): { speed: number; etaSecs: number } {
+    if (!this.on) return { speed: 0, etaSecs: 0 };
+    const dt = (Date.now() - this.t0) / 1000;
+    if (dt < 0.3) return { speed: 0, etaSecs: 0 };
+    const speed = Math.round((bytes - this.b0) / dt);
+    const remaining = total - bytes;
+    const etaSecs = speed > 0 && remaining > 0 ? Math.round(remaining / speed) : 0;
+    return { speed, etaSecs };
+  }
+
+  reset() { this.on = false; }
 }
 
 export class TransferClient {
-    private isTransferring = false;
-    private shouldStop = false;
-    private isProbing = false;
-    private downloadedFiles = new Set<string>();
-    public onStatus?: (status: TransferStatus) => void;
-  // ── Xender-style: remember sender's IP so we can register back ──
+  private isTransferring = false;
+  private shouldStop = false;
+  private isProbing = false;
+  private downloadedFiles = new Set<string>();
+  private activeJobs = new Set<number>();
+  private currentFiles: any[] = [];
+  public onStatus?: (status: TransferStatus) => void;
+
   public connectedIp: string | null = null;
   public connectedPort: number = 8888;
 
-  // Max auto-retries per file on transient errors (network blip, timeout)
-  private static readonly MAX_RETRIES = 3;
-  // Base delay for exponential backoff: 1s, 2s, 4s
-  private static readonly RETRY_BASE_DELAY_MS = 1000;
+  private static readonly MAX_RETRIES = 5;
+  private static readonly RETRY_BASE_DELAY_MS = 1500;
 
-    start(port = 8888, saveDir: string, specificIp?: string) {
-        console.log(`[TransferClient] Starting client on port ${port}...`);
-        this.shouldStop = false;
-        this.isTransferring = false;
-        this.isProbing = false;
-        this.initConnection(port, saveDir, specificIp);
-    }
+  private secretKey?: string;
+  private speedTrackers = new Map<string, SpeedTracker>();
 
-    stop() {
-        console.log('[TransferClient] Stopping client...');
-        this.shouldStop = true;
-        this.isTransferring = false;
-        this.isProbing = false;
-      // Clear peer connection info
-      this.connectedIp = null;
-    }
+  start(port = 8888, saveDir: string, specificIp?: string, secretKey?: string) {
+    this.shouldStop = false;
+    this.isTransferring = false;
+    this.isProbing = false;
+    this.activeJobs.clear();
+    this.speedTrackers.clear();
+    this.currentFiles = [];
+    this.secretKey = secretKey;
+    this.initConnection(port, saveDir, specificIp);
+  }
 
-  /**
-   * Remove a file from the "already downloaded" set so the retry logic
-   * treats it as a new file and re-downloads (resuming from partial).
-   */
+  stop() {
+    this.shouldStop = true;
+    this.isTransferring = false;
+    this.isProbing = false;
+    this.activeJobs.forEach(id => { try { RNFS.stopDownload(id); } catch (_) { } });
+    this.activeJobs.clear();
+    this.speedTrackers.clear();
+    this.currentFiles = [];
+    this.downloadedFiles.clear();
+    this.connectedIp = null;
+  }
+
   clearFailedFile(fileName: string, fileSize: number) {
     this.downloadedFiles.delete(fileName + fileSize);
-    console.log(`[TransferClient] Cleared ${fileName} from downloaded set — will resume on next poll.`);
+    this.speedTrackers.delete(fileName);
   }
 
-  /**
-   * Xender-style: Tell the sender our IP and port so they can connect back.
-   * Call this after connection is confirmed (TransferStatus.type === 'connection').
-   */
   async registerWithPeer(myPort: number): Promise<void> {
-    if (!this.connectedIp || this.shouldStop) {
-      console.warn('[TransferClient] registerWithPeer: no connectedIp, skipping');
-      return;
-    }
+    if (!this.connectedIp || this.shouldStop) return;
     try {
-      // Use GET with query params to avoid chunked JSON body issues during native TCP streaming
-      // Omit `ip` from params because Sender will read true reachable IP from socket.remoteAddress
       const url = `http://${this.connectedIp}:${this.connectedPort}/api/register?port=${myPort}`;
-      const controller = new AbortController();
-      const tid = setTimeout(() => controller.abort(), 6000);
-      await fetch(url, {
-        method: 'GET',
-        signal: controller.signal,
-      });
+      const ctrl = new AbortController();
+      const tid = setTimeout(() => ctrl.abort(), 6000);
+      await fetch(url, { method: 'GET', signal: ctrl.signal });
       clearTimeout(tid);
-      console.log(`[TransferClient] ✅ Registered with peer at ${this.connectedIp}:${this.connectedPort}`);
-    } catch (e) {
-      console.warn('[TransferClient] registerWithPeer failed (non-fatal):', e);
+    } catch (_) { }
+  }
+
+  private emit(status: TransferStatus) { this.onStatus?.(status); }
+
+  private async initConnection(port: number, saveDir: string, specificIp?: string) {
+    if (this.isProbing || this.shouldStop) return;
+    this.isProbing = true;
+
+    if (Platform.OS === 'android') {
+      try { const W = require('react-native-wifi-reborn').default; await W.forceWifiUsage(true); } catch (_) { }
+    }
+
+    this.emit({ type: 'log', message: '🔍 Discovering sender...', connected: false });
+
+    let foundIp: string | null = null;
+
+    if (specificIp && specificIp !== '0.0.0.0' && specificIp !== '127.0.0.1') {
+      const myIp = await DeviceInfo.getIpAddress().catch(() => '');
+      if (specificIp !== myIp) {
+        this.emit({ type: 'log', message: `🎯 Trying known IP: ${specificIp}...`, connected: false });
+        for (let i = 0; i < 12 && !this.shouldStop; i++) {
+          if (await DiscoveryManager.probeTcpPort(specificIp, port, 3000)) { foundIp = specificIp; break; }
+          this.emit({ type: 'log', message: `⏳ Waiting for network... (${i + 1}/12)`, connected: false });
+          await new Promise(r => setTimeout(r, 2000));
+        }
+      }
+    }
+
+    if (!foundIp && !this.shouldStop) {
+      foundIp = await DiscoveryManager.discoverSender(port, msg => this.emit({ type: 'log', message: msg, connected: false }));
+    }
+
+    this.isProbing = false;
+
+    if (foundIp && !this.shouldStop) {
+      this.persistentLoop(foundIp, port, saveDir);
+    } else if (!this.shouldStop) {
+      this.emit({ type: 'log', message: '❌ Sender not found. Make sure both devices are on the same Wi-Fi.', connected: false });
     }
   }
 
-    private reportStatus(status: TransferStatus) {
-        if (this.onStatus) {
-            this.onStatus(status);
-        }
-    }
+  private async persistentLoop(ip: string, port: number, saveDir: string) {
+    this.connectedIp = ip;
+    this.connectedPort = port;
+    this.emit({ type: 'connection', message: '✅ Connected!', connected: true });
 
-    private async initConnection(port: number, saveDir: string, specificIp?: string) {
-        if (this.isProbing || this.shouldStop) return;
-        this.isProbing = true;
+    let failCount = 0;
+    while (!this.shouldStop) {
+      try {
+        const files = await this.fetchMetadata(ip, port);
+        failCount = 0;
+        this.currentFiles = files;
 
-      // ── CRITICAL FIX: Force traffic through Wi-Fi on Android ──
-      // Must do this BEFORE probing, otherwise OS will try to route via Cellular
-      // because the hotspot has no internet connection!
-      if (Platform.OS === 'android') {
-        try {
-          const WifiManager = require('react-native-wifi-reborn').default;
-          await WifiManager.forceWifiUsage(true);
-        } catch (_) { }
-      }
+        if (files?.length > 0) {
+          this.emit({ type: 'log', message: this.isTransferring ? '⬇️ Downloading...' : '⏳ Standing by...', connected: true, files: this.currentFiles });
 
-      this.reportStatus({ type: 'log', message: '🔍 Discovering sender...', connected: false });
-
-      let foundIp: string | null = null;
-
-      // ── If caller already knows the IP (e.g. from QR scan), probe it first ──
-        if (specificIp && specificIp !== '0.0.0.0' && specificIp !== '127.0.0.1') {
-          // Double-check we don't accidentally probe ourselves (Receiver's own server)
-          const myIp = await DeviceInfo.getIpAddress().catch(() => '');
-          if (specificIp === myIp) {
-            console.log(`[TransferClient] specificIp (${specificIp}) matches my local IP! Skipping direct probe to avoid self-connection.`);
-          } else {
-            this.reportStatus({
-              type: 'log',
-              message: `🎯 Trying known IP: ${specificIp}...`,
-              connected: false
-            });
-
-            let ok = false;
-            // Retry up to 10 times to allow the Wi-Fi connection to fully establish
-            for (let i = 0; i < 10; i++) {
-              if (this.shouldStop) break;
-              ok = await DiscoveryManager.probeTcpPort(specificIp, port, 3000);
-              if (ok) break;
-
-              this.reportStatus({
-                type: 'log',
-                message: `⏳ Waiting for network... (Attempt ${i + 1}/10)`,
-                connected: false
-              });
-              await new Promise(r => setTimeout(r, 2000));
-            }
-
-            if (ok && !this.shouldStop) {
-              foundIp = specificIp;
+          if (!this.isTransferring) {
+            // Only queue files not yet fully downloaded
+            const newFiles = files.filter((f: any) => !this.downloadedFiles.has(f.name + (f.size || 0)));
+            if (newFiles.length > 0) {
+              this.isTransferring = true;
+              this.downloadAll(newFiles, ip, port, saveDir, files)
+                .catch(e => console.error('[Client] downloadAll failed:', e))
+                .finally(() => { this.isTransferring = false; });
             }
           }
         }
-
-      // ── Full discovery (mDNS primary → subnet scan fallback) ──
-      if (!foundIp && !this.shouldStop) {
-        foundIp = await DiscoveryManager.discoverSender(
-          port,
-          (msg) => this.reportStatus({ type: 'log', message: msg, connected: false })
-        );
-      }
-
-      this.isProbing = false;
-
-      if (foundIp && !this.shouldStop) {
-        console.log(`[TransferClient] Sender found at ${foundIp}`);
-        this.persistentLoop(foundIp, port, saveDir);
-      } else if (!this.shouldStop) {
-        this.reportStatus({
-          type: 'log',
-          message: '❌ Sender not found. Make sure both devices are on the same Wi-Fi.',
-          connected: false
-        });
-      }
-    }
-
-    private async persistentLoop(ip: string, port: number, saveDir: string) {
-      // ── Store peer IP so registerWithPeer() can use it ──
-      this.connectedIp = ip;
-      this.connectedPort = port;
-      this.reportStatus({ type: 'connection', message: '✅ Connected!', connected: true });
-        console.log(`[TransferClient] Standing by for files from ${ip}...`);
-
-        let failCount = 0;
-      while (!this.shouldStop) {
-        try {
-          const files = await this.fetchMetadata(ip, port);
-          failCount = 0;
-
-          if (files && files.length > 0) {
-                this.reportStatus({
-                  type: 'log',
-                  message: this.isTransferring ? '⬇️ Downloading...' : '⏳ Standing by...',
-                  connected: true,
-                  files
-                });
-
-                if (!this.isTransferring) {
-                  const newFiles = files.filter(
-                    (f: any) => !this.downloadedFiles.has(f.name + (f.size || 0))
-                  );
-                        if (newFiles.length > 0) {
-                            console.log(`[TransferClient] New files detected: ${newFiles.length}`);
-                          this.isTransferring = true;
-                            await this.downloadAll(newFiles, ip, port, saveDir);
-                            this.isTransferring = false;
-                        }
-                    }
-              }
-        } catch (e) {
-          failCount++;
-          console.log(`[TransferClient] Polling error (retry ${failCount})`);
-          if (failCount > 10 && !this.shouldStop) {
-            console.log(`[TransferClient] Connection lost to ${ip}. Re-discovering...`);
-            this.reportStatus({
-              type: 'log',
-              message: '🔄 Connection lost. Re-discovering...',
-              connected: false
-            });
-            this.initConnection(port, saveDir, ip);
-            return;
-          }
+      } catch (_) {
+        failCount++;
+        if (failCount > 10 && !this.shouldStop) {
+          this.emit({ type: 'log', message: '🔄 Connection lost. Re-discovering...', connected: false });
+          this.initConnection(port, saveDir, ip);
+          return;
         }
-        // Adaptive polling: fast when active transfer, slow when idle
-        await new Promise(r => setTimeout(r, this.isTransferring ? 500 : 2000));
-        }
+      }
+      await new Promise(r => setTimeout(r, 2000));
     }
-
-  // trySingleIp removed — use DiscoveryManager.probeTcpPort() instead
+  }
 
   private async fetchMetadata(ip: string, port: number): Promise<any[]> {
-    const url = `http://${ip}:${port}/api/files`;
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 8000);
+    const ctrl = new AbortController();
+    const tid = setTimeout(() => ctrl.abort(), 10000);
     try {
-          const response = await fetch(url, { signal: controller.signal });
-          clearTimeout(timeoutId);
-          if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-          return await response.json();
-        } catch (e) {
-          clearTimeout(timeoutId);
-          throw e;
-        }
-    }
+      const res = await fetch(`http://${ip}:${port}/api/files`, { signal: ctrl.signal });
+      clearTimeout(tid);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.json();
+    } catch (e) { clearTimeout(tid); throw e; }
+  }
 
-    async downloadAll(files: any[], ip: string, port: number, saveDir: string) {
-      if (!(await RNFS.exists(saveDir))) { await RNFS.mkdir(saveDir).catch(() => { }); }
+  async downloadAll(files: any[], ip: string, port: number, saveDir: string, allKnownFiles?: any[]) {
+    if (!(await RNFS.exists(saveDir))) await RNFS.mkdir(saveDir).catch(() => { });
+    this.currentFiles = allKnownFiles || files;
+    this.emit({ type: 'log', message: '⬇️ Starting batch download...', connected: true, files: this.currentFiles });
 
-      // ── 3-Tier Parallelism Strategy ───────────────────────────────────
-      // Small  (<5MB):   3 parallel — fast, minimal memory pressure
-      // Medium (5-50MB): 2 parallel — balanced speed + stability
-      // Large  (>50MB):  1 at a time — maximizes bandwidth per file
-      const smallFiles = files.filter(f => (f.size || 0) < 5 * 1024 * 1024);
-      const mediumFiles = files.filter(f => (f.size || 0) >= 5 * 1024 * 1024 && (f.size || 0) < 50 * 1024 * 1024);
-      const largeFiles = files.filter(f => (f.size || 0) >= 50 * 1024 * 1024);
-
-      const runBatch = async (batch: any[], concurrency: number) => {
-        for (let i = 0; i < batch.length; i += concurrency) {
-          if (this.shouldStop) break;
-          const chunk = batch.slice(i, i + concurrency);
-          await Promise.all(
-            chunk.map(file =>
-              this.downloadFile(file, ip, port, saveDir)
-                .then(() => this.downloadedFiles.add(file.name + (file.size || 0)))
-                    .catch(e => console.error(`[TransferClient] Download failed: ${file.name}`, e))
-                )
-              );
-        }
-      };
-
-      await runBatch(smallFiles, 3);
-      await runBatch(mediumFiles, 2);
-      await runBatch(largeFiles, 1);
-
-      this.reportStatus({ type: 'complete', message: '✅ Batch Completed', connected: true });
-    }
-
-  private downloadFile(file: any, ip: string, port: number, saveDir: string): Promise<void> {
-    return this.downloadFileWithRetry(file, ip, port, saveDir, 0);
-    }
-
-  /**
-   * Core download logic with exponential-backoff retry.
-   *
-   * On NETWORK ERROR:
-   *   - Keep partial file (resume on next attempt via Range header)
-   *   - Wait: 1s, 2s, 4s between retries
-   *   - After MAX_RETRIES, reject so batch can continue with other files
-   *
-   * On BAD HTTP STATUS (4xx/5xx):
-   *   - Delete partial (unrecoverable for this session)
-   *   - Reject immediately (no point retrying)
-   */
-  private async downloadFileWithRetry(
-    file: any,
-    ip: string,
-    port: number,
-    saveDir: string,
-    attempt: number
-  ): Promise<void> {
-        const dest = `${saveDir}/${file.name}`;
-      const total: number = file.size || 0;
-      const maxRetries = TransferClient.MAX_RETRIES;
-
-      // ── Integrity / Skip Check ────────────────────────────────────────────
-      if (await RNFS.exists(dest)) {
-            const stat = await RNFS.stat(dest);
-          if (stat.size >= total && total > 0) {
-            console.log(`[TransferClient] ✅ ${file.name} already complete, skipping.`);
-            this.reportStatus({
-              type: 'progress',
-              connected: true,
-              fileProgress: { name: file.name, percent: 100, received: total, total }
-            });
-            return;
-        }
-      }
-
-      // ── Calculate resume offset ───────────────────────────────────────────
-      let resumeFrom = 0;
-      if (await RNFS.exists(dest)) {
-        const stat = await RNFS.stat(dest);
-        if (stat.size > 0) {
-          resumeFrom = stat.size;
-          const pct = Math.min(99, Math.floor((resumeFrom / total) * 100));
-          console.log(`[TransferClient] ⏩ Attempt ${attempt + 1}/${maxRetries + 1} — Resuming ${file.name} from byte ${resumeFrom} (${pct}%)`);
-          this.reportStatus({
-            type: 'progress',
-            connected: true,
-            fileProgress: { name: file.name, percent: pct, received: resumeFrom, total }
-          });
-        }
-        } else {
-          this.reportStatus({
-            type: 'progress',
-            connected: true,
-            fileProgress: { name: file.name, percent: 0, received: 0, total }
-          });
-        }
-
-      const downloadUrl = `http://${ip}:${port}/api/download?name=${encodeURIComponent(file.name)}`;
-      const headers: Record<string, string> = {};
-      if (resumeFrom > 0) {
-        headers['Range'] = `bytes=${resumeFrom}-`;
-      }
-
+    for (const file of files) {
+      if (this.shouldStop) break;
+      this.emit({ type: 'log', message: `⬇️ Downloading: ${file.name}`, connected: true, files: this.currentFiles });
       try {
-          console.log(`[TransferClient] ⬇️  Downloading: ${file.name} from byte ${resumeFrom}`);
-
-          const { promise } = RNFS.downloadFile({
-                fromUrl: downloadUrl,
-                toFile: dest,
-              headers,
-                progressDivider: 2,
-              begin: () => console.log(`[TransferClient] Download begin: ${file.name}`),
-                progress: (res) => {
-                  const received = resumeFrom + res.bytesWritten;
-                  const expectedTotal = total > 0 ? total : (res.contentLength + resumeFrom);
-                  const pct = Math.min(100, Math.floor((received / expectedTotal) * 100));
-                  this.reportStatus({
-                    type: 'progress',
-                    connected: true,
-                    fileProgress: { name: file.name, percent: pct, received, total: expectedTotal }
-                  });
-                }
-            });
-
-          const res = await promise;
-
-          // ── 200 OK (full) or 206 Partial Content (resumed) = success ─────
-          if (res.statusCode === 200 || res.statusCode === 206) {
-            // Final integrity check: file size must match declaration
-            if (total > 0) {
-              const finalStat = await RNFS.stat(dest).catch(() => null);
-              if (finalStat && finalStat.size < total) {
-                console.warn(`[TransferClient] ⚠️  ${file.name} size mismatch (got ${finalStat.size}, expected ${total}). Will resume.`);
-                // File is partial — do not mark as complete, let next poll resume it
-                return;
-              }
-            }
-
-            this.reportStatus({
-              type: 'progress',
-              connected: true,
-              fileProgress: { name: file.name, percent: 100, received: total, total }
-            });
-            saveHistoryItem({
-              fileName: file.name,
-              fileSize: file.size,
-              type: file.type || 'unknown',
-              role: 'received',
-              status: 'success'
-            });
-            console.log(`[TransferClient] ✅ Download complete: ${file.name}`);
-            return;
-          }
-
-          // ── Bad HTTP status — unrecoverable, discard partial ─────────────
-          await RNFS.unlink(dest).catch(() => { });
-          throw new Error(`HTTP ${res.statusCode} — unrecoverable, discarding partial file.`);
-
-        } catch (e: any) {
-          const isLastAttempt = attempt >= maxRetries;
-
-          if (isLastAttempt || this.shouldStop) {
-            // Partial file is KEPT so the next session's retry can resume
-            console.error(`[TransferClient] ❌ ${file.name} failed after ${attempt + 1} attempt(s): ${e.message}`);
-            throw e; // Let batch handle the error
-            }
-
-          // ── Exponential backoff before next attempt ───────────────────────
-          const delayMs = TransferClient.RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
-          console.warn(`[TransferClient] ⚠️  ${file.name} failed (attempt ${attempt + 1}/${maxRetries + 1}). Retrying in ${delayMs}ms...`);
-          this.reportStatus({
-            type: 'log',
-            message: `⚠️ ${file.name} — retrying in ${delayMs / 1000}s... (${attempt + 1}/${maxRetries})`,
-            connected: true
-            });
-
-          await new Promise(r => setTimeout(r, delayMs));
-
-          // Recurse with incremented attempt counter
-          return this.downloadFileWithRetry(file, ip, port, saveDir, attempt + 1);
-        }
+        await this.downloadWithRetry(file, ip, port, saveDir, 0);
+        // Mark ONLY after confirmed complete — prevents re-queue race
+        this.downloadedFiles.add(file.name + (file.size || 0));
+        console.log(`[Client] ✅ Confirmed complete: ${file.name}`);
+      } catch (e) {
+        // Do NOT add to downloadedFiles — will retry on next poll
+        console.error(`[Client] ❌ Download failed (will retry next poll): ${file.name}`, e);
+      }
     }
+
+    this.emit({ type: 'complete', message: '✅ Batch Completed', connected: true, files: this.currentFiles });
+  }
+
+  private async downloadWithRetry(file: any, ip: string, port: number, saveDir: string, attempt: number): Promise<void> {
+    const dest = `${saveDir}/${file.name}`;
+    const total: number = file.size || 0;
+
+    // Skip if already complete
+    if (await RNFS.exists(dest)) {
+      const stat = await RNFS.stat(dest);
+      if (stat.size >= total && total > 0) {
+        this.emit({ type: 'progress', connected: true, files: this.currentFiles, fileProgress: { name: file.name, percent: 100, received: total, total, speed: 0, etaSecs: 0 } });
+        return;
+      }
+    }
+
+    // Resume support
+    let resumeFrom = 0;
+    if (await RNFS.exists(dest)) {
+      const stat = await RNFS.stat(dest);
+      if (stat.size > 0) {
+        resumeFrom = stat.size;
+        const pct = Math.min(99, Math.floor((resumeFrom / total) * 100));
+        this.emit({ type: 'progress', connected: true, files: this.currentFiles, fileProgress: { name: file.name, percent: pct, received: resumeFrom, total, speed: 0, etaSecs: 0 } });
+      }
+    } else {
+      this.emit({ type: 'progress', connected: true, files: this.currentFiles, fileProgress: { name: file.name, percent: 0, received: 0, total, speed: 0, etaSecs: 0 } });
+    }
+
+    // Init speed tracker for this file
+    if (!this.speedTrackers.has(file.name)) {
+      const t = new SpeedTracker();
+      t.begin(resumeFrom);
+      this.speedTrackers.set(file.name, t);
+    }
+
+    const tracker = this.speedTrackers.get(file.name)!;
+    const headers: Record<string, string> = {};
+    if (resumeFrom > 0 && !this.secretKey) headers['Range'] = `bytes=${resumeFrom}-`;
+
+    const downloadUrl = `http://${ip}:${port}/api/download?name=${encodeURIComponent(file.name)}`;
+
+    try {
+      const { jobId, promise } = RNFS.downloadFile({
+        fromUrl: downloadUrl,
+        toFile: dest,
+        headers,
+        progressDivider: 1,
+        progressInterval: 200,   // 200ms — smooth UI, low overhead
+        readTimeout: 120000,
+        connectionTimeout: 15000,
+        background: false,
+        begin: (r) => {
+          console.log(`[Client] Begin: ${file.name} content-length=${r.contentLength}`);
+        },
+        progress: (r) => {
+          const received = resumeFrom + r.bytesWritten;
+          const expectedTotal = total > 0 ? total : (r.contentLength > 0 ? r.contentLength + resumeFrom : received);
+          if (expectedTotal === 0) return;
+          const pct = Math.min(99, Math.floor((received / expectedTotal) * 100));
+          const { speed, etaSecs } = tracker.sample(received, expectedTotal);
+          this.emit({
+            type: 'progress', connected: true, files: this.currentFiles,
+            fileProgress: { name: file.name, percent: pct, received, total: expectedTotal, speed, etaSecs },
+          });
+        },
+      });
+
+      this.activeJobs.add(jobId);
+      const result = await promise.finally(() => this.activeJobs.delete(jobId));
+
+      if (result.statusCode === 200 || result.statusCode === 206) {
+        // Decrypt if needed
+        if (this.secretKey) {
+          const encB64 = await RNFS.readFile(dest, 'base64');
+          const key = CryptoJS.SHA256(this.secretKey);
+          const iv = CryptoJS.enc.Hex.parse(key.toString().substring(0, 32));
+          const dec = CryptoJS.AES.decrypt(encB64, key, { iv });
+          const decB64 = dec.toString(CryptoJS.enc.Utf8);
+          if (!decB64) throw new Error('Decryption failed');
+          await RNFS.writeFile(dest, decB64, 'base64');
+        }
+
+        // Integrity check — if size mismatch, delete partial and let retry handle it
+        if (total > 0 && !this.secretKey) {
+          const finalStat = await RNFS.stat(dest).catch(() => null);
+          if (!finalStat || finalStat.size < total) {
+            console.warn(`[Client] ⚠️ Size mismatch ${file.name}: got ${finalStat?.size} expected ${total}. Deleting partial.`);
+            await RNFS.unlink(dest).catch(() => { });
+            throw new Error(`Size mismatch — got ${finalStat?.size}, expected ${total}`);
+          }
+        }
+
+        this.speedTrackers.delete(file.name);
+        this.emit({ type: 'progress', connected: true, files: this.currentFiles, fileProgress: { name: file.name, percent: 100, received: total, total, speed: 0, etaSecs: 0 } });
+        saveHistoryItem({ fileName: file.name, fileSize: file.size, type: file.type || 'unknown', role: 'received', status: 'success' });
+        return;
+      }
+
+      await RNFS.unlink(dest).catch(() => { });
+      throw new Error(`HTTP ${result.statusCode}`);
+
+    } catch (e: any) {
+      if (attempt >= TransferClient.MAX_RETRIES || this.shouldStop) throw e;
+      const delay = TransferClient.RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
+      this.emit({ type: 'log', message: `⚠️ ${file.name} — retrying... (${attempt + 1}/${TransferClient.MAX_RETRIES})`, connected: true, files: this.currentFiles });
+      await new Promise(r => setTimeout(r, delay));
+      return this.downloadWithRetry(file, ip, port, saveDir, attempt + 1);
+    }
+  }
 }
 
 export default new TransferClient();

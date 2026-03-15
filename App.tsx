@@ -120,7 +120,11 @@ const AppNavigator = () => {
   );
 };
 
+import { useSharingIntent } from './src/hooks/useSharingIntent';
+
 const App = () => {
+  useSharingIntent();
+
   useEffect(() => {
     // ── Only request permissions for RETURNING users ──
     // New users: permissions will be asked AFTER onboarding completes

@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <!-- Allow cleartext traffic for all connections since local network IPs are dynamic -->
-    <base-config cleartextTrafficPermitted="true" />
+    <!-- Allow everything for local P2P transfers -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="@raw/flashdrop_cert" />
+        </trust-anchors>
+    </base-config>
 </network-security-config>

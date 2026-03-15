@@ -124,13 +124,13 @@ const ReceiveScreen = ({ route }: any) => {
         if (codes.length > 0 && codes[0].value) {
           try {
             const qr = JSON.parse(codes[0].value);
-            connectToHotspot(qr.ssid, qr.pass, qr.ip, qr.mac);
+            connectToHotspot(qr.ssid, qr.pass, qr.ip, qr.mac, qr.key);
           } catch (e) { }
         }
     },
   });
 
-  const connectToHotspot = async (ssid: string, password?: string, ip?: string, mac?: string) => {
+  const connectToHotspot = async (ssid: string, password?: string, ip?: string, mac?: string, secretKey?: string) => {
     setConnectionStatus('connecting');
     setConnectionLog('Connecting to Hotspot...');
     try {
@@ -144,8 +144,6 @@ const ReceiveScreen = ({ route }: any) => {
         } catch (e) {
           console.log('P2P connect failed, falling back to SSID', e);
         }
-      } else if (mac === '02:00:00:00:00:00') {
-        console.log('[ReceiveScreen] Cannot use OS-masked MAC address for P2P connection, bypassing direct native P2P.');
       }
 
       if (!connectedViaP2P && ssid) {
@@ -155,24 +153,21 @@ const ReceiveScreen = ({ route }: any) => {
       }
 
       if (ssid) {
-          // Update Zustand store with the sender's IP (target)
           setConnectionDetails({ type: 'hotspot', ssid, ip: ip || '' });
-        }
+      }
 
-      // Fetch local IP only for debugging/logs, don't overwrite target IP in store
       DeviceInfo.getIpAddress().then((newIp) => {
         setLocalIp(newIp);
-          console.log('[ReceiveScreen] Local IP:', newIp);
-        }).catch(() => { });
+      }).catch(() => { });
 
-        connectToTransferServer(ssid, ip);
+      connectToTransferServer(ssid, ip, secretKey);
     } catch (e) {
-        setConnectionStatus('error');
-      Alert.alert("Error", "Connection failed. Please connect manually in Settings.");
+      setConnectionStatus('error');
+      Alert.alert("Error", "Connection failed.");
     }
   };
 
-  const connectToTransferServer = (ssid?: string, ip?: string) => {
+  const connectToTransferServer = (ssid?: string, ip?: string, secretKey?: string) => {
     // Save to public Downloads folder so users can find their files easily in their File Manager
     const downloadDir = Platform.OS === 'android'
       ? `${RNFS.DownloadDirectoryPath}/FlashDrop`
@@ -180,7 +175,7 @@ const ReceiveScreen = ({ route }: any) => {
 
     // ── Xender-style: Start receiver's own server so sender can send back ──
     // Files list starts empty; receiver adds files via "Send More" in FileTransferScreen.
-    TransferServer.start(8888, []);
+      TransferServer.start(8888, [], undefined, secretKey);
 
     TransferClient.onStatus = (status: TransferStatus) => {
       if (status.type === 'log') setConnectionLog(status.message || '');
@@ -193,10 +188,10 @@ const ReceiveScreen = ({ route }: any) => {
         // (Sender will use the remote IP from the socket, so we only send our port)
         TransferClient.registerWithPeer(8888).catch(() => { });
 
-        (navigation as any).replace('FileTransfer', { role: 'receiver', deviceName: ssid || 'Sender', initialFiles: [] });
+        (navigation as any).replace('FileTransfer', { role: 'receiver', deviceName: ssid || 'Sender', initialFiles: [], secretKey });
       }
     };
-    TransferClient.start(8888, downloadDir, ip);
+      TransferClient.start(8888, downloadDir, ip, secretKey);
   };
 
   const rotation = rotateAnim.interpolate({
