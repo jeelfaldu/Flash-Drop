@@ -22,7 +22,7 @@ import { useNavigation, useRoute } from '@react-navigation/native';
 import TransferServer from '../utils/TransferServer';
 import TransferClient, { TransferStatus } from '../utils/TransferClient';
 import NotificationService from '../utils/NotificationService';
-import RNFS from 'react-native-fs';
+import ReactNativeBlobUtil from 'react-native-blob-util';
 import { useTheme } from '../theme/ThemeContext';
 import { useTransferStore } from '../store';
 import { useToast } from '../components/Toast';
@@ -206,15 +206,18 @@ const FileTransferScreen = () => {
     // Subscribe to progress updates
     if (role === 'sender') {
       // Sender: track outgoing files via own server
+      // 'progress'        = phone sending to receiver
+      // 'upload_progress' = PC uploading to this phone via browser
       TransferServer.statusCallback = (status) => {
-        if (status.type === 'progress' && status.fileProgress) {
+        const fp = status.fileProgress;
+        if ((status.type === 'progress' || status.type === 'upload_progress') && fp) {
           updateFileProgress(
-            status.fileProgress.name,
-            status.fileProgress.percent,
-            status.fileProgress.sent,
-            status.fileProgress.total,
-            status.fileProgress.speed,
-            status.fileProgress.etaSecs,
+            fp.name,
+            fp.percent,
+            fp.sent,
+            fp.total,
+            fp.speed,
+            fp.etaSecs,
           );
         }
       };
@@ -266,10 +269,10 @@ const FileTransferScreen = () => {
       };
 
       // ── Xender-style: Receiver also tracks uploads from own server ──
-      // When sender downloads from receiver's server, show progress on receiver's screen
       TransferServer.statusCallback = (status) => {
-        if (status.type === 'progress' && status.fileProgress) {
-          const { name, percent, sent } = status.fileProgress;
+        const fp = status.fileProgress;
+        if ((status.type === 'progress' || status.type === 'upload_progress') && fp) {
+          const { name, percent } = fp;
           setFiles((prev) => {
             const updated = { ...prev };
             if (updated[name]) {
@@ -299,8 +302,8 @@ const FileTransferScreen = () => {
     if (role !== 'sender') return;
 
     const saveDir = Platform.OS === 'android'
-      ? `${RNFS.DownloadDirectoryPath}/FlashDrop`
-      : `${RNFS.DocumentDirectoryPath}/FlashDrop`;
+      ? `${ReactNativeBlobUtil.fs.dirs.DownloadDir}/FlashDrop`
+      : `${ReactNativeBlobUtil.fs.dirs.DocumentDir}/FlashDrop`;
 
     TransferServer.onPeerRegistered((peerIp, peerPort) => {
       console.log(`[FileTransfer] 🔄 Peer registered: ${peerIp}:${peerPort}. Starting reverse TransferClient...`);
@@ -421,13 +424,13 @@ const FileTransferScreen = () => {
       setStats((prevStat: any) => {
         const now = Date.now();
 
-        // ── Speed: both sender and receiver now get speed/etaSecs from their respective engines ──
-        // Sender → TransferServer.report() calculates wall-clock speed
-        // Receiver → TransferClient progress callback calculates hybrid speed
+        // ── Speed: prefer rolling average from TransferClient (receiver side) ─────
+        // For sender side, fall back to time-diff calculation
         let speed = prevStat.transferSpeed || '0 KB/s';
         let eta = prevStat.eta || '--:--';
 
         if (speedBps !== undefined && speedBps > 0) {
+          // Receiver side: client-provided rolling average (most accurate)
           speed = speedBps > 1024 * 1024
             ? (speedBps / (1024 * 1024)).toFixed(2) + ' MB/s'
             : (speedBps / 1024).toFixed(2) + ' KB/s';
@@ -443,10 +446,32 @@ const FileTransferScreen = () => {
           } else if (percent >= 100) {
             eta = '0:00';
           }
-        } else if (speedBps === 0) {
-          // Engine says speed=0 (just started or stalled) — keep last known, no flicker
+          // else keep prevStat.eta until a valid estimate arrives
+        } else if (speedBps !== undefined && speedBps === 0) {
+          // Rolling window still filling (first 1-2 callbacks) — keep last known values
+          // speed and eta stay as prevStat values — no flicker to "0 KB/s"
+        } else {
+          // speedBps === undefined → Sender side: derive speed from time-diff
+          const timeDiff = (now - prevStat.lastUpdateTime) / 1000;
+          const bytesDiff = totalTransferred - prevStat.lastTransferredSize;
+          if (timeDiff >= 0.5 && bytesDiff > 0) {
+            const bps = bytesDiff / timeDiff;
+            speed = bps > 1024 * 1024
+              ? (bps / (1024 * 1024)).toFixed(2) + ' MB/s'
+              : bps > 512
+                ? (bps / 1024).toFixed(2) + ' KB/s'
+                : '< 1 KB/s';
+            const remaining = Math.max(0, totalSize - totalTransferred);
+            if (remaining > 0 && bps > 0) {
+              const sLeft = Math.floor(remaining / bps);
+              eta = sLeft < 3600
+                ? `${Math.floor(sLeft / 60)}:${String(sLeft % 60).padStart(2, '0')}`
+                : '> 1h';
+            } else if (remaining === 0) {
+              eta = '0:00';
+            }
+          }
         }
-        // speedBps undefined should no longer happen with unified approach
 
         // Notifications and celebrations — throttle to avoid spam
         if (now - prevStat.lastUpdateTime > 1500 || progress >= 1) {
@@ -616,11 +641,11 @@ const FileTransferScreen = () => {
   const handleOpenFile = async (item: FileItem) => {
     if (role === 'receiver' && item.status === 'completed') {
       const path = Platform.OS === 'android'
-        ? `${RNFS.DownloadDirectoryPath}/FlashDrop/${item.name}`
-        : `${RNFS.DocumentDirectoryPath}/FlashDrop/${item.name}`;
+        ? `${ReactNativeBlobUtil.fs.dirs.DownloadDir}/FlashDrop/${item.name}`
+        : `${ReactNativeBlobUtil.fs.dirs.DocumentDir}/FlashDrop/${item.name}`;
 
       try {
-        const exists = await RNFS.exists(path);
+        const exists = await ReactNativeBlobUtil.fs.exists(path);
         if (exists) {
           const fileUrl = Platform.OS === 'android' ? `file://${path}` : path;
           Linking.openURL(fileUrl).catch(() => {
@@ -652,8 +677,8 @@ const FileTransferScreen = () => {
     }
     // Receiver side — reconstruct path from save directory
     const saveDir = Platform.OS === 'android'
-      ? `${RNFS.DownloadDirectoryPath}/FlashDrop`
-      : `${RNFS.DocumentDirectoryPath}/FlashDrop`;
+      ? `${ReactNativeBlobUtil.fs.dirs.DownloadDir}/FlashDrop`
+      : `${ReactNativeBlobUtil.fs.dirs.DocumentDir}/FlashDrop`;
     if (item.status === 'completed') {
       return `file://${saveDir}/${item.name}`;
     }

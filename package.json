@@ -23,6 +23,7 @@
     "buffer": "^6.0.3",
     "react": "19.1.1",
     "react-native": "0.82.1",
+    "react-native-blob-util": "^0.24.7",
     "react-native-contacts": "^8.0.7",
     "react-native-device-info": "^15.0.1",
     "react-native-fast-image": "^8.6.3",

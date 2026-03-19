@@ -1,5 +1,6 @@
 import { Platform } from 'react-native';
-import RNFS from 'react-native-fs';
+import ReactNativeBlobUtil from 'react-native-blob-util';
+
 import { Buffer } from 'buffer';
 import DeviceInfo from 'react-native-device-info';
 import CryptoJS from 'crypto-js';
@@ -48,7 +49,7 @@ export class TransferClient {
   private shouldStop = false;
   private isProbing = false;
   private downloadedFiles = new Set<string>();
-  private activeJobs = new Set<number>();
+  private activeJobs = new Map<string, any>();
   private currentFiles: any[] = [];
   public onStatus?: (status: TransferStatus) => void;
 
@@ -76,7 +77,7 @@ export class TransferClient {
     this.shouldStop = true;
     this.isTransferring = false;
     this.isProbing = false;
-    this.activeJobs.forEach(id => { try { RNFS.stopDownload(id); } catch (_) { } });
+    this.activeJobs.forEach(job => { try { job.cancel(); } catch (_) { } });
     this.activeJobs.clear();
     this.speedTrackers.clear();
     this.currentFiles = [];
@@ -189,7 +190,7 @@ export class TransferClient {
   }
 
   async downloadAll(files: any[], ip: string, port: number, saveDir: string, allKnownFiles?: any[]) {
-    if (!(await RNFS.exists(saveDir))) await RNFS.mkdir(saveDir).catch(() => { });
+    if (!(await ReactNativeBlobUtil.fs.exists(saveDir))) await ReactNativeBlobUtil.fs.mkdir(saveDir).catch(() => { });
     this.currentFiles = allKnownFiles || files;
     this.emit({ type: 'log', message: '⬇️ Starting batch download...', connected: true, files: this.currentFiles });
 
@@ -215,8 +216,8 @@ export class TransferClient {
     const total: number = file.size || 0;
 
     // Skip if already complete
-    if (await RNFS.exists(dest)) {
-      const stat = await RNFS.stat(dest);
+    if (await ReactNativeBlobUtil.fs.exists(dest)) {
+      const stat = await ReactNativeBlobUtil.fs.stat(dest);
       if (stat.size >= total && total > 0) {
         this.emit({ type: 'progress', connected: true, files: this.currentFiles, fileProgress: { name: file.name, percent: 100, received: total, total, speed: 0, etaSecs: 0 } });
         return;
@@ -225,8 +226,8 @@ export class TransferClient {
 
     // Resume support
     let resumeFrom = 0;
-    if (await RNFS.exists(dest)) {
-      const stat = await RNFS.stat(dest);
+    if (await ReactNativeBlobUtil.fs.exists(dest)) {
+      const stat = await ReactNativeBlobUtil.fs.stat(dest);
       if (stat.size > 0) {
         resumeFrom = stat.size;
         const pct = Math.min(99, Math.floor((resumeFrom / total) * 100));
@@ -250,52 +251,47 @@ export class TransferClient {
     const downloadUrl = `http://${ip}:${port}/api/download?name=${encodeURIComponent(file.name)}`;
 
     try {
-      const { jobId, promise } = RNFS.downloadFile({
-        fromUrl: downloadUrl,
-        toFile: dest,
-        headers,
-        progressDivider: 1,
-        progressInterval: 200,   // 200ms — smooth UI, low overhead
-        readTimeout: 120000,
-        connectionTimeout: 15000,
-        background: false,
-        begin: (r) => {
-          console.log(`[Client] Begin: ${file.name} content-length=${r.contentLength}`);
-        },
-        progress: (r) => {
-          const received = resumeFrom + r.bytesWritten;
-          const expectedTotal = total > 0 ? total : (r.contentLength > 0 ? r.contentLength + resumeFrom : received);
-          if (expectedTotal === 0) return;
-          const pct = Math.min(99, Math.floor((received / expectedTotal) * 100));
-          const { speed, etaSecs } = tracker.sample(received, expectedTotal);
-          this.emit({
-            type: 'progress', connected: true, files: this.currentFiles,
-            fileProgress: { name: file.name, percent: pct, received, total: expectedTotal, speed, etaSecs },
-          });
-        },
+      const task = ReactNativeBlobUtil.config({
+        path: dest,
+        overwrite: resumeFrom === 0,
+      }).fetch('GET', downloadUrl, headers);
+
+      this.activeJobs.set(file.name, task);
+
+      task.progress((received, totalCount) => {
+        const currentTotal = Number(totalCount);
+        const receivedSoFar = resumeFrom + Number(received);
+        const expectedTotal = total > 0 ? total : (currentTotal > 0 ? currentTotal + resumeFrom : receivedSoFar);
+        if (expectedTotal === 0) return;
+        const pct = Math.min(99, Math.floor((receivedSoFar / expectedTotal) * 100));
+        const { speed, etaSecs } = tracker.sample(receivedSoFar, expectedTotal);
+        this.emit({
+          type: 'progress', connected: true, files: this.currentFiles,
+          fileProgress: { name: file.name, percent: pct, received: receivedSoFar, total: expectedTotal, speed, etaSecs },
+        });
       });
 
-      this.activeJobs.add(jobId);
-      const result = await promise.finally(() => this.activeJobs.delete(jobId));
+      const result = await task.finally(() => this.activeJobs.delete(file.name));
+      const respInfo = result.info();
 
-      if (result.statusCode === 200 || result.statusCode === 206) {
+      if (respInfo.status === 200 || respInfo.status === 206) {
         // Decrypt if needed
         if (this.secretKey) {
-          const encB64 = await RNFS.readFile(dest, 'base64');
+          const encB64 = await ReactNativeBlobUtil.fs.readFile(dest, 'base64');
           const key = CryptoJS.SHA256(this.secretKey);
           const iv = CryptoJS.enc.Hex.parse(key.toString().substring(0, 32));
           const dec = CryptoJS.AES.decrypt(encB64, key, { iv });
           const decB64 = dec.toString(CryptoJS.enc.Utf8);
           if (!decB64) throw new Error('Decryption failed');
-          await RNFS.writeFile(dest, decB64, 'base64');
+          await ReactNativeBlobUtil.fs.writeFile(dest, decB64, 'base64');
         }
 
         // Integrity check — if size mismatch, delete partial and let retry handle it
         if (total > 0 && !this.secretKey) {
-          const finalStat = await RNFS.stat(dest).catch(() => null);
+          const finalStat = await ReactNativeBlobUtil.fs.stat(dest).catch(() => null);
           if (!finalStat || finalStat.size < total) {
             console.warn(`[Client] ⚠️ Size mismatch ${file.name}: got ${finalStat?.size} expected ${total}. Deleting partial.`);
-            await RNFS.unlink(dest).catch(() => { });
+            await ReactNativeBlobUtil.fs.unlink(dest).catch(() => { });
             throw new Error(`Size mismatch — got ${finalStat?.size}, expected ${total}`);
           }
         }
@@ -306,8 +302,8 @@ export class TransferClient {
         return;
       }
 
-      await RNFS.unlink(dest).catch(() => { });
-      throw new Error(`HTTP ${result.statusCode}`);
+      await ReactNativeBlobUtil.fs.unlink(dest).catch(() => { });
+      throw new Error(`HTTP ${respInfo.status}`);
 
     } catch (e: any) {
       if (attempt >= TransferClient.MAX_RETRIES || this.shouldStop) throw e;
