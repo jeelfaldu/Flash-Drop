@@ -79,6 +79,9 @@ class DiscoveryManager {
 
     try {
       console.log(`[Discovery] Publishing mDNS service on port ${port}`);
+      this.zeroconf.on('published', (service: any) => console.log('[Discovery] mDNS Service Published:', service));
+      this.zeroconf.on('error', (err: any) => console.log('[Discovery] mDNS Publish Error:', err));
+
       this.zeroconf.publishService(
         '_flashdrop._tcp.', // type
         'tcp',              // protocol
@@ -187,6 +190,11 @@ class DiscoveryManager {
         }
       }, timeoutMs);
 
+      zc.on('start', () => console.log('[Discovery] mDNS scan started'));
+      zc.on('found', (name: string) => console.log('[Discovery] mDNS service found:', name));
+      zc.on('update', () => console.log('[Discovery] mDNS scan updated'));
+      zc.on('error', (err: any) => console.log('[Discovery] mDNS scan error:', err));
+
       zc.on('resolved', (service: any) => {
         if (resolved) return;
         console.log('[Discovery] mDNS resolved:', JSON.stringify(service));
@@ -259,7 +267,10 @@ class DiscoveryManager {
           batch.map(ip => this.probeTcpPort(ip, port, PROBE_TIMEOUT))
         );
         const found = batch[results.findIndex(r => r)];
-        if (found) return found;
+        if (found) {
+          console.log('[Discovery] Subnet scan found host:', found);
+          return found;
+        }
       }
 
       // On retry, refresh candidate list (IP might have changed)
@@ -290,22 +301,22 @@ class DiscoveryManager {
     const seen = new Set<string>();
     const candidates: string[] = [];
 
+    // ① Get my own IP first to exclude it
+    let myIp = '';
+    try {
+      myIp = await DeviceInfo.getIpAddress();
+    } catch (_) { }
+
     const add = (ip: string) => {
-      // ── CRITICAL FIX: Exclude myIp so we don't connect to our own Xender-style server ──
+      // ── CRITICAL FIX: Exclude myIp so we don't connect to our own server ──
       if (ip && ip !== '0.0.0.0' && ip !== '127.0.0.1' && ip !== myIp && !seen.has(ip)) {
         seen.add(ip);
         candidates.push(ip);
       }
     };
 
-    // ① Common Android Wi-Fi Direct / Hotspot gateways
+    // ② Common Android Wi-Fi Direct / Hotspot gateways
     ['192.168.49.1', '192.168.43.1', '192.168.45.1', '10.0.0.1', '192.168.251.1'].forEach(add);
-
-    // ② Derive subnet from own IP
-    let myIp = '';
-    try {
-      myIp = await DeviceInfo.getIpAddress();
-    } catch (_) {}
 
     if (myIp && myIp !== '0.0.0.0') {
       const parts = myIp.split('.');

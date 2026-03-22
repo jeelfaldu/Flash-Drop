@@ -121,6 +121,7 @@ const AppNavigator = () => {
 };
 
 import { useSharingIntent } from './src/hooks/useSharingIntent';
+import { useTransferStore, useConnectionStore } from './src/store';
 
 const App = () => {
   useSharingIntent();
@@ -136,8 +137,13 @@ const App = () => {
         requestConnectPermissions();
       }
 
+      // ── CLEANUP: Force reset stores to wipe out ghost data from older versions ──
+      useTransferStore.getState().resetTransfer();
+      useConnectionStore.getState().resetConnection();
+
       // Show ad only for returning users
       if (!isReturningUser || !DisplayAds) return;
+
 
       const unsubscribeLoaded = interstitial.addAdEventListener(AdEventType.LOADED, () => {
         interstitial.show();

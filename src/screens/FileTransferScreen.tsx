@@ -23,8 +23,12 @@ import TransferServer from '../utils/TransferServer';
 import TransferClient, { TransferStatus } from '../utils/TransferClient';
 import NotificationService from '../utils/NotificationService';
 import ReactNativeBlobUtil from 'react-native-blob-util';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import WiFiDirectTransferService from '../utils/Wifidirecttransferservice';
+import type { DirectTransferStatus } from '../utils/Wifidirecttransferservice';
+import { WifiP2pDevice } from '../utils/Wifidirectmanager';
 import { useTheme } from '../theme/ThemeContext';
-import { useTransferStore } from '../store';
+import { useTransferStore, FileItem } from '../store';
 import { useToast } from '../components/Toast';
 import HapticUtil from '../utils/HapticUtil';
 import { FileCardSkeleton } from '../components/SkeletonLoader';
@@ -36,19 +40,15 @@ const interstitial = InterstitialAd.createForAdRequest(interstitialId, {
   requestNonPersonalizedAdsOnly: false,
 });
 
+
+// ── Component Constants ───────────────────────────────
 const { width } = Dimensions.get('window');
 
-interface FileItem {
-  name: string;
-  size: number;
-  progress: number;
-  status: 'pending' | 'transferring' | 'completed' | 'error';
-  type?: string;
-}
 
 const FileTransferScreen = () => {
   const navigation = useNavigation();
   const route = useRoute();
+  const insets = useSafeAreaInsets();
   const { colors, typography, layout, spacing, isDark } = useTheme();
   const toast = useToast();
 
@@ -68,6 +68,11 @@ const FileTransferScreen = () => {
   const celebrationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Prevent celebration from firing multiple times for same batch
   const didCelebrate = useRef(false);
+
+  // ── P2P States ────────────────────────────────────────────────────
+  const [p2pDevices, setP2pDevices] = useState<WifiP2pDevice[]>([]);
+  const [p2pStatus, setP2pStatus] = useState<string>('');
+  const [useWifiDirect, setUseWifiDirect] = useState(true);
 
   // Zustand store
   const {
@@ -110,6 +115,7 @@ const FileTransferScreen = () => {
             // Xender-style: stop both on any role
             TransferServer.stop();
             TransferClient.stop();
+            WiFiDirectTransferService.stop();
             resetTransfer();
             setTransferring(false); // Ensure state is reset
             (navigation as any).navigate('Home');
@@ -184,7 +190,8 @@ const FileTransferScreen = () => {
               size: size,
               progress: 0,
               status: 'pending' as const,
-              type: f.type
+              type: f.type,
+              direction: 'sent' // ── Added for Chat UI ──
             };
             added = true;
           }
@@ -200,174 +207,120 @@ const FileTransferScreen = () => {
     }
   }, [initialFiles]); // Only run when new initialFiles are passed via navigation
 
+  // ── Unified Transfer Integration (Wi-Fi Direct + Standard) ───────
   useEffect(() => {
-    updateSpaceStats();
-
-    // Subscribe to progress updates
-    if (role === 'sender') {
-      // Sender: track outgoing files via own server
-      // 'progress'        = phone sending to receiver
-      // 'upload_progress' = PC uploading to this phone via browser
-      TransferServer.statusCallback = (status) => {
-        const fp = status.fileProgress;
-        if ((status.type === 'progress' || status.type === 'upload_progress') && fp) {
-          updateFileProgress(
-            fp.name,
-            fp.percent,
-            fp.sent,
-            fp.total,
-            fp.speed,
-            fp.etaSecs,
-          );
-        }
-      };
-    } else {
-      // Receiver: track downloads from sender
-      TransferClient.onStatus = (status: TransferStatus) => {
-        if (status.type === 'progress' && status.fileProgress) {
-          updateFileProgress(
-            status.fileProgress.name,
-            status.fileProgress.percent,
-            status.fileProgress.received,
-            status.fileProgress.total,    // ← pass total so file size shows correctly
-            status.fileProgress.speed,
-            status.fileProgress.etaSecs
-          );
-        }
-
-        if (status.files) {
-          setFiles((prev) => {
-            const updated = { ...prev };
-            let added = false;
-            (status.files as any[]).forEach((f: any) => {
-              if (!updated[f.name]) {
-                // File not in list yet — add it
-                updated[f.name] = {
-                  id: f.name,
-                  uri: '',
-                  name: f.name,
-                  size: f.size || 0,
-                  progress: 0,
-                  status: 'pending' as const,
-                  type: f.type
-                };
-                added = true;
-              } else if (!updated[f.name].size && f.size) {
-                // File was added via progress (size=0) — update its real size
-                updated[f.name] = { ...updated[f.name], size: f.size };
-                added = true;
-              }
-            });
-            if (added) {
-              const allFiles = Object.values(updated) as FileItem[];
-              const grandTotal = allFiles.reduce((acc: number, f: FileItem) => acc + (f.size || 0), 0);
-              setStats((s: any) => ({ ...s, totalSize: grandTotal }));
-            }
-            return updated;
-          });
-        }
-      };
-
-      // ── Xender-style: Receiver also tracks uploads from own server ──
-      TransferServer.statusCallback = (status) => {
-        const fp = status.fileProgress;
-        if ((status.type === 'progress' || status.type === 'upload_progress') && fp) {
-          const { name, percent } = fp;
-          setFiles((prev) => {
-            const updated = { ...prev };
-            if (updated[name]) {
-              updated[name] = {
-                ...updated[name],
-                progress: percent / 100,
-                status: percent === 100 ? ('completed' as const) : ('uploading' as any),
-              };
-            }
-            return updated;
-          });
-        }
-      };
-    }
-
-    return () => {
-      // Deliberately NOT clearing statusCallback/onStatus here
-      // so progress, notifications, and the GlobalTransferOverlay
-      // continue updating even if the user navigates to the Home screen.
-    };
-  }, [role, deviceName]); // Re-subscribe if role or device name unexpectedly changes
-
-  // ── Xender-style: Sender listens for peer registration ──────────────────────────
-  // When receiver registers, sender starts a reverse TransferClient
-  // to poll receiver's server and download files receiver wants to send.
-  useEffect(() => {
-    if (role !== 'sender') return;
-
     const saveDir = Platform.OS === 'android'
       ? `${ReactNativeBlobUtil.fs.dirs.DownloadDir}/FlashDrop`
       : `${ReactNativeBlobUtil.fs.dirs.DocumentDir}/FlashDrop`;
 
-    TransferServer.onPeerRegistered((peerIp, peerPort) => {
-      console.log(`[FileTransfer] 🔄 Peer registered: ${peerIp}:${peerPort}. Starting reverse TransferClient...`);
+    const handleServerStatus = (status: any) => {
+      // Periodic intense logs only if it's not spamming progress (reduce spam)
+      if (status.type !== 'progress' && status.type !== 'upload_progress') {
+        console.log(`[FileTransferScreen] SERVER Event:`, status.type, status);
+      }
+      const fp = status.fileProgress;
+      if ((status.type === 'progress' || status.type === 'upload_progress' || status.type === 'complete') && fp) {
+        updateFileProgress(fp.name, fp.percent, fp.sent, fp.total, fp.speed, fp.etaSecs);
+      }
+    };
 
-      // Wire up reverse-direction progress: files coming FROM receiver TO sender
-      TransferClient.onStatus = (status: TransferStatus) => {
-        if (status.type === 'progress' && status.fileProgress) {
-          // Receiver is sending us files — show in sender's file list
-          const { name, percent, received, speed, etaSecs } = status.fileProgress;
-          setFiles((prev) => {
-            const updated = { ...prev };
-            if (updated[name]) {
-              updated[name] = {
-                ...updated[name],
-                progress: percent / 100,
-                status: percent === 100 ? ('completed' as const) : ('downloading' as any),
+    const handleClientStatus = (status: any) => {
+      if (status.type !== 'progress') {
+        console.log(`[FileTransferScreen] CLIENT Event:`, status.type, status.message || status);
+      }
+      if ((status.type === 'progress' || status.type === 'complete') && status.fileProgress) {
+        const fp = status.fileProgress;
+        updateFileProgress(fp.name, fp.percent, fp.received, fp.total, fp.speed, fp.etaSecs);
+      }
+      if (status.files) {
+        setFiles((prev) => {
+          const updated = { ...prev };
+          let added = false;
+          (status.files as any[]).forEach((f: any) => {
+            if (!updated[f.name]) {
+              updated[f.name] = { 
+                id: f.name, 
+                uri: '', 
+                name: f.name, 
+                size: f.size || 0, 
+                progress: 0, 
+                status: 'pending' as const, 
+                type: f.type,
+                direction: 'received' // ── Added for Chat UI ──
               };
+              added = true;
             }
-            return updated;
           });
-          // Also update stats for reverse direction
-          if (speed !== undefined && etaSecs !== undefined) {
-            updateStatsFromClientSpeed(speed, etaSecs, name, percent);
+          if (added) {
+            const allFiles = Object.values(updated) as FileItem[];
+            const grandTotal = allFiles.reduce((acc: number, f: FileItem) => acc + (f.size || 0), 0);
+            setStats((s: any) => ({ ...s, totalSize: grandTotal }));
           }
-        }
+          return updated;
+        });
+      }
+    };
 
-        if (status.files) {
-          // New files available on receiver's server — add to list
-          setFiles((prev) => {
-            const updated = { ...prev };
-            let added = false;
-            (status.files as any[]).forEach((f: any) => {
-              if (!updated[f.name]) {
-                updated[f.name] = {
-                  id: f.name,
-                  uri: '',
-                  name: f.name,
-                  size: f.size,
-                  progress: 0,
-                  status: 'pending' as const,
-                  type: f.type,
-                };
-                added = true;
-              }
-            });
-            if (added) {
-              const allFiles = Object.values(updated) as FileItem[];
-              const grandTotal = allFiles.reduce((acc: number, f: FileItem) => acc + (f.size || 0), 0);
-              setStats((s: any) => ({ ...s, totalSize: grandTotal }));
-            }
-            return updated;
-          });
+    if (useWifiDirect && Platform.OS === 'android') {
+      // ── Use Wi-Fi Direct Service ──
+      WiFiDirectTransferService.onStatus = (status: DirectTransferStatus) => {
+        if (status.type !== 'client' && status.type !== 'server') {
+          console.log(`[FileTransferScreen] DIRECT TRANSFER STATUS:`, status.type);
         }
+        
+        if (status.type === 'p2p') {
+          const s = status.status;
+          if (s.type === 'discovering') setP2pStatus('🔍 ' + s.message);
+          if (s.type === 'peers_found') { setP2pDevices(s.devices); setP2pStatus(`📡 ${s.devices.length} found`); }
+          if (s.type === 'connecting') setP2pStatus('🔗 ' + s.message);
+          if (s.type === 'connected') { setP2pStatus(`✅ Connected P2P`); HapticUtil.success(); }
+          if (s.type === 'group_created') setP2pStatus(`📡 Hotspot Ready`);
+          if (s.type === 'error') setP2pStatus('❌ ' + s.message);
+        }
+        if (status.type === 'server') handleServerStatus(status.status);
+        if (status.type === 'client') handleClientStatus(status.status);
+        if (status.type === 'ready') setP2pStatus(`🚀 Active — ${status.ip}`);
       };
 
-      // Start polling receiver's server for files they want to send
-      TransferClient.start(peerPort, saveDir, peerIp);
-    });
+      // Only start if NOT already running
+      if (!WiFiDirectTransferService.isRunning()) {
+        if (role === 'sender') {
+          WiFiDirectTransferService.startSender(initialFiles).catch(console.error);
+        } else {
+          WiFiDirectTransferService.startReceiver(saveDir, (devices) => setP2pDevices(devices)).catch(console.error);
+        }
+      } else {
+        // Already running, just ensure files are synced for sender
+        if (role === 'sender') WiFiDirectTransferService.addFiles(initialFiles);
+        // Emit a fake "ready" to update local p2pStatus
+        setP2pStatus(role === 'sender' ? '🚀 Active Sender' : '🚀 Active Receiver');
+      }
+    } else {
+      // ── Standard Wi-Fi / Fallback ──
+      updateSpaceStats();
+      TransferServer.statusCallback = handleServerStatus;
+      TransferClient.onStatus = handleClientStatus;
 
-    // Cleanup: clear callback on unmount
+      if (role === 'sender') {
+        TransferServer.start(8888, initialFiles, handleServerStatus);
+      } else {
+        const ip = params.ip;
+        if (ip) {
+          TransferClient.start(8888, saveDir, ip);
+        }
+      }
+    }
+
     return () => {
-      TransferServer.onPeerRegistered(undefined);
+      // Don't call stop() here. 
+      // Xender/ShareIt allow you to browse while transferring.
+      // Explicit Stop is handled in handleBack / handleDisconnect.
+      WiFiDirectTransferService.onStatus = undefined;
+      TransferServer.statusCallback = undefined;
+      TransferClient.onStatus = undefined;
     };
-  }, [role]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [role, useWifiDirect, initialFiles]);
+
 
   // ── Stats update from rolling-average speed provided by TransferClient ─────
   const updateStatsFromClientSpeed = (speedBps: number, etaSecs: number, name: string, percent: number) => {
@@ -407,9 +360,10 @@ const FileTransferScreen = () => {
           id: name,
           uri: '',
           name,
-          size: fileTotal || 0,  // use known total, not 0
+          size: fileTotal || 0,
           progress: percent / 100,
           type: 'file',
+          direction: role === 'sender' ? 'sent' : 'received', // ── Fallback direction logic ──
           status: role === 'sender' ? ('uploading' as const) : ('downloading' as const)
         };
       }
@@ -424,13 +378,13 @@ const FileTransferScreen = () => {
       setStats((prevStat: any) => {
         const now = Date.now();
 
-        // ── Speed: prefer rolling average from TransferClient (receiver side) ─────
-        // For sender side, fall back to time-diff calculation
+        // ── Speed: both sender and receiver now get speed/etaSecs from their respective engines ──
+        // Sender → TransferServer.report() calculates wall-clock speed
+        // Receiver → TransferClient progress callback calculates hybrid speed
         let speed = prevStat.transferSpeed || '0 KB/s';
         let eta = prevStat.eta || '--:--';
 
         if (speedBps !== undefined && speedBps > 0) {
-          // Receiver side: client-provided rolling average (most accurate)
           speed = speedBps > 1024 * 1024
             ? (speedBps / (1024 * 1024)).toFixed(2) + ' MB/s'
             : (speedBps / 1024).toFixed(2) + ' KB/s';
@@ -446,32 +400,10 @@ const FileTransferScreen = () => {
           } else if (percent >= 100) {
             eta = '0:00';
           }
-          // else keep prevStat.eta until a valid estimate arrives
-        } else if (speedBps !== undefined && speedBps === 0) {
-          // Rolling window still filling (first 1-2 callbacks) — keep last known values
-          // speed and eta stay as prevStat values — no flicker to "0 KB/s"
-        } else {
-          // speedBps === undefined → Sender side: derive speed from time-diff
-          const timeDiff = (now - prevStat.lastUpdateTime) / 1000;
-          const bytesDiff = totalTransferred - prevStat.lastTransferredSize;
-          if (timeDiff >= 0.5 && bytesDiff > 0) {
-            const bps = bytesDiff / timeDiff;
-            speed = bps > 1024 * 1024
-              ? (bps / (1024 * 1024)).toFixed(2) + ' MB/s'
-              : bps > 512
-                ? (bps / 1024).toFixed(2) + ' KB/s'
-                : '< 1 KB/s';
-            const remaining = Math.max(0, totalSize - totalTransferred);
-            if (remaining > 0 && bps > 0) {
-              const sLeft = Math.floor(remaining / bps);
-              eta = sLeft < 3600
-                ? `${Math.floor(sLeft / 60)}:${String(sLeft % 60).padStart(2, '0')}`
-                : '> 1h';
-            } else if (remaining === 0) {
-              eta = '0:00';
-            }
-          }
+        } else if (speedBps === 0) {
+          // Engine says speed=0 (just started or stalled) — keep last known, no flicker
         }
+        // speedBps undefined should no longer happen with unified approach
 
         // Notifications and celebrations — throttle to avoid spam
         if (now - prevStat.lastUpdateTime > 1500 || progress >= 1) {
@@ -698,133 +630,121 @@ const FileTransferScreen = () => {
     }
 
     // Determine tier: 0–4 lit bars
-    const bars = mbps === 0 ? 0 : mbps < 1 ? 1 : mbps < 5 ? 2 : mbps < 20 ? 3 : 4;
-    const barColor = mbps === 0 ? 'rgba(255,255,255,0.25)'
-      : mbps < 1 ? '#FF6B6B'   // red: very slow
-        : mbps < 5 ? '#FFC048'   // orange: moderate
-          : mbps < 20 ? '#00D189'  // green: fast
-            : '#00E5FF';             // cyan: Wi-Fi Direct speed
+    const isTransferred = stats.transferredSize > 0 && stats.transferredSize < stats.totalSize;
+    const bars = mbps === 0 ? (isTransferred ? 0 : 1) : mbps < 1 ? 1 : mbps < 5 ? 2 : mbps < 15 ? 3 : 4;
+    const barColor = mbps === 0 ? (isTransferred ? '#FF6B6B' : 'rgba(255,255,255,0.25)')
+      : mbps < 1 ? '#FFC048'   // orange: slow-ish
+        : mbps < 5 ? '#00D1FF'   // light blue: good
+          : mbps < 15 ? '#4ADE80'  // green: fast
+            : '#7C4DFF';           // purple: ultra fast (P2P)
 
     const barHeights = [10, 16, 22, 28];
 
     return (
-      <View style={[styles.connQualityBadge, { backgroundColor: isDark ? 'rgba(0,0,0,0.3)' : 'rgba(255,255,255,0.2)', borderColor: 'rgba(255,255,255,0.35)' }]}>
-        {/* Speed text */}
-        <Text style={{ color: '#FFF', fontSize: 11, fontWeight: '700', letterSpacing: 0.3 }}>
-          {speed === '0 KB/s' ? 'Connecting' : speed}
-        </Text>
-        {/* Signal bars */}
+      <View style={[styles.connQualityBadge, { backgroundColor: isDark ? 'rgba(0,0,0,0.3)' : 'rgba(255,255,255,0.2)', borderColor: 'rgba(255,255,255,0.25)' }]}>
+        <View style={{ flex: 1 }}>
+            <Text style={{ color: '#FFF', fontSize: 12, fontWeight: '900', letterSpacing: 0.1 }}>
+                {mbps === 0 ? 'READY' : speed}
+            </Text>
+            <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 9, fontWeight: '800', marginTop: -2 }}>
+                {mbps === 0 ? 'STANDING BY' : 'TRANSFER SPEED'}
+            </Text>
+        </View>
         <View style={styles.barsRow}>
-          {barHeights.map((h, i) => {
-            const isLit = i < bars;
-            return (
-              <View
-                key={i}
-                style={[
-                  styles.signalBar,
-                  {
-                    height: h,
-                    backgroundColor: isLit ? barColor : 'rgba(255,255,255,0.25)',
-                  }
-                ]}
-              />
-            );
-          })}
+          {barHeights.map((h, i) => (
+            <View
+              key={i}
+              style={[styles.signalBar, { height: h, backgroundColor: i < bars ? barColor : 'rgba(255,255,255,0.15)' }]}
+            />
+          ))}
         </View>
       </View>
     );
   });
 
   const FileCardItem = React.memo(({ item }: { item: FileItem }) => {
-    const isImage = item.type?.includes('image');
-    const isVideo = item.type?.includes('video');
-    const displayUri = getDisplayUri(item);
-    const showThumbnail = (isImage || isVideo) && !!displayUri;
+    const isCompleted = item.status === 'completed';
+    const isError = item.status === 'error';
+    const isPending = item.status === 'pending';
+    const isActive = item.status === 'uploading' || item.status === 'downloading';
 
-    return (
-      <View style={[styles.fileCard]}>
-        {showThumbnail ? (
-          <View style={[styles.thumbnailContainer, { backgroundColor: isDark ? colors.surface : '#F0F0F0' }]}>
-            <Image
-              source={{ uri: displayUri }}
-              style={styles.thumbnail}
-              resizeMode="cover"
-            />
-            {isVideo && (
-              <View style={styles.playIconOverlay}>
-                <View style={styles.playIconBg}>
-                  <Icon name="play" size={14} color="#FFF" />
+    const isMe = role === 'sender';
+    const accentColor = isMe ? colors.primary : colors.secondary;
+    const labelText = isMe ? '📱 You' : `📱 ${deviceName || 'Device'}`;
+    const alignStyle = isMe ? { alignSelf: 'flex-end' as const, alignItems: 'flex-end' as const } : { alignSelf: 'flex-start' as const, alignItems: 'flex-start' as const };
+    
+    if (isCompleted || isError) {
+      const bubbleBg = isMe
+          ? (isDark ? '#1A2A1A' : '#F0FFF4')
+          : (isDark ? '#1A1A2A' : '#F5F0FF');
+      return (
+        <View style={[styles.chatBubbleWrapper, alignStyle]}>
+          <Text style={[styles.chatBubbleLabel, { color: accentColor, fontFamily: typography.fontFamily }]}>
+            {labelText}
+          </Text>
+          <View style={[styles.chatBubbleDone, { backgroundColor: bubbleBg, borderColor: isError ? colors.error + '30' : colors.success + '30' }]}>
+             <View style={styles.chatBubbleTop}>
+                <View style={[styles.chatFileIcon, { backgroundColor: isError ? colors.error + '20' : colors.success + '20' }]}>
+                  <Icon name={isError ? "close-circle" : "file-check"} size={16} color={isError ? colors.error : colors.success} />
                 </View>
-              </View>
-            )}
-            {item.status === 'transferring' && (
-              <View style={[StyleSheet.absoluteFillObject, { backgroundColor: 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center', borderRadius: 14 }]}>
-                <Text style={{ color: '#FFF', fontWeight: '800', fontSize: 13 }}>
-                  {Math.round(item.progress * 100)}%
+                <Text style={[styles.chatFileName, { color: colors.text, fontFamily: typography.fontFamily }]} numberOfLines={1}>
+                  {item.name}
                 </Text>
-              </View>
-            )}
-          </View>
-        ) : (
-            <View style={[styles.iconContainer, {
-              backgroundColor: getIconColor(item.type) + '18',
-              borderWidth: 1.5,
-              borderColor: getIconColor(item.type) + '35',
-              shadowColor: getIconColor(item.type),
-              shadowOpacity: item.status === 'transferring' ? 0.3 : 0,
-              shadowRadius: 8,
-              shadowOffset: { width: 0, height: 0 },
-              elevation: item.status === 'transferring' ? 4 : 0,
-            }]}>
-              <Icon name={getIconForType(item.type)} size={26} color={getIconColor(item.type)} />
-            </View>
-        )}
-        <View style={styles.fileDetails}>
-          <View style={styles.fileHeader}>
-            <View style={{ flex: 1, marginRight: 10 }}>
-              <Text style={[styles.fileName, { color: item.status === 'completed' ? (colors.subtext) : colors.text, fontFamily: typography.fontFamily }]} numberOfLines={1}>
-                {item.name}
-              </Text>
-              <Text style={[styles.fileSize, { color: colors.subtext }]}>{formatSize(item.size)}</Text>
-            </View>
-            {item.status === 'completed' ? (
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                <View style={[styles.statusCheckBadge, { backgroundColor: colors.success }]}>
-                  <Icon name="check" size={12} color="#FFF" />
-                </View>
-                {role === 'receiver' && (
-                  <TouchableOpacity onPress={() => handleOpenFile(item)} style={[styles.openBtn, { borderColor: colors.primary + '60', backgroundColor: colors.primary + '10' }]}>
-                    <Text style={{ color: colors.primary, fontSize: 11, fontWeight: '700', letterSpacing: 0.5 }}>OPEN</Text>
-                  </TouchableOpacity>
-                )}
-              </View>
-            ) : (
-                item.status === 'transferring' ? (
-                  <Text style={{ fontSize: 13, color: colors.primary, fontWeight: '800', fontVariant: ['tabular-nums'] }}>
-                    {Math.round(item.progress * 100)}%
-                  </Text>
+                {isError ? (
+                  <Icon name="alert-circle" size={16} color={colors.error} style={{ marginLeft: 4 }} />
                 ) : (
-                    <View style={[styles.pendingBadge, { borderColor: colors.border, backgroundColor: colors.border + '60' }]}>
-                      <Icon name="clock-outline" size={13} color={colors.subtext} />
-                    </View>
-                  )
-            )}
-          </View>
-          <View style={[styles.progressContainer, { backgroundColor: colors.border + '80' }]}>
-            <View style={styles.progressBarBg}>
-              <LinearGradient
-                colors={item.status === 'completed' ? [colors.success, colors.success + 'CC'] : colors.gradient}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 0 }}
-                style={[styles.progressBarFill, { width: `${item.progress * 100}%` }]}
-              />
-            </View>
+                  <Icon name="check-circle" size={16} color={colors.success} style={{ marginLeft: 4 }} />
+                )}
+             </View>
+             <Text style={[styles.chatSizeText, { color: colors.subtext, fontFamily: typography.fontFamily, marginTop: 4 }]}>
+                {formatSize(item.size)} · {isError ? 'Failed' : 'Done'}
+             </Text>
           </View>
         </View>
-      </View>
-    );
+      );
+    }
+
+    if (isActive || isPending) {
+        const bubbleBg = isMe
+          ? (isDark ? colors.primary + '22' : colors.primary + '14')
+          : (isDark ? colors.secondary + '22' : colors.secondary + '14');
+        return (
+          <View style={[styles.chatBubbleWrapper, alignStyle]}>
+            <Text style={[styles.chatBubbleLabel, { color: accentColor, fontFamily: typography.fontFamily }]}>
+              {labelText}
+            </Text>
+            <View style={[styles.chatBubble, { backgroundColor: bubbleBg, borderColor: accentColor + '30' }]}>
+               <View style={styles.chatBubbleTop}>
+                  <View style={[styles.chatFileIcon, { backgroundColor: accentColor + '20' }]}>
+                    <Icon name={isPending ? "clock-outline" : "file"} size={16} color={accentColor} />
+                  </View>
+                  <Text style={[styles.chatFileName, { color: colors.text, fontFamily: typography.fontFamily }]} numberOfLines={1}>
+                    {item.name}
+                  </Text>
+                  {!isPending && (
+                    <Text style={[styles.chatPercent, { color: accentColor, fontFamily: typography.fontFamily }]}>
+                      {Math.round((item.progress || 0) * 100)}%
+                    </Text>
+                  )}
+                  {isPending && (
+                      <Icon name="dots-horizontal" size={16} color={accentColor} style={{ marginLeft: 4 }} />
+                  )}
+               </View>
+               {!isPending && (
+                 <View style={[styles.chatBarBg, { backgroundColor: isDark ? '#2A2A2A' : '#DCDCDC' }]}>
+                   <View style={[styles.chatBarFill, { backgroundColor: accentColor, width: `${(item.progress || 0) * 100}%` as any }]} />
+                 </View>
+               )}
+               <Text style={[styles.chatSizeText, { color: colors.subtext, fontFamily: typography.fontFamily }]}>
+                  {isPending ? `${formatSize(item.size)} · Waiting...` : `${formatSize((item.progress || 0) * item.size)} / ${formatSize(item.size)}`}
+               </Text>
+            </View>
+          </View>
+        );
+    }
+
+    return null;
   }, (prevProps, nextProps) => {
-    // Only re-render if progress or status changes to boost performance
     return prevProps.item.progress === nextProps.item.progress &&
       prevProps.item.status === nextProps.item.status;
   });
@@ -840,14 +760,14 @@ const FileTransferScreen = () => {
   }, [files]);
 
   return (
-    <>
-      <View style={[styles.container, { backgroundColor: colors.background }]}>
+    <View style={styles.container}>
         <StatusBar
-          barStyle={isDark ? 'light-content' : 'dark-content'}
+          barStyle={'light-content'}
           translucent
           backgroundColor="transparent"
         />
 
+        {/* ── Gradient Dashboard Header ── */}
         <View style={styles.headerWrapper}>
           <LinearGradient
             colors={colors.gradient}
@@ -855,172 +775,143 @@ const FileTransferScreen = () => {
             start={{ x: 0, y: 0 }}
             end={{ x: 1, y: 1 }}
           />
-          {/* Decorative glow circles */}
-          <View style={styles.headerGlowTop} />
-          <View style={styles.headerGlowBottom} />
           <SafeAreaView>
             <View style={styles.headerContent}>
-              <TouchableOpacity
-                onPress={handleBack}
-                style={styles.iconButton}
-              >
+              <TouchableOpacity onPress={handleBack} style={styles.iconBtn}>
                 <Icon name="arrow-left" size={22} color="#FFF" />
               </TouchableOpacity>
-
+              
               <View style={{ flex: 1, marginLeft: 14 }}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                  <Text style={[styles.headerTitle, { fontFamily: typography.fontFamily }]}>
-                    {role === 'sender' ? 'Sending' : 'Receiving'}
-                  </Text>
-                  {/* Live pulse dot */}
-                  <View style={styles.liveDot} />
-                </View>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 3 }}>
-                  <View style={styles.deviceBadge}>
-                    <Icon name="cellphone" size={11} color="rgba(255,255,255,0.7)" />
-                  </View>
-                  <Text style={[styles.headerSubtitle, { color: 'rgba(255,255,255,0.7)', fontFamily: typography.fontFamily }]}>
-                    {role === 'sender' ? 'To' : 'From'} {deviceName || 'Device'}
-                  </Text>
-                </View>
+                <Text style={[styles.headerTitle, { fontFamily: typography.fontFamily }]}>
+                   {role === 'sender' ? 'Sending files' : 'Receiving files'}
+                </Text>
+                <Text style={[styles.headerSub, { fontFamily: typography.fontFamily }]}>
+                   {role === 'sender' ? 'To: ' : 'From: '} {deviceName || 'Device'}
+                </Text>
               </View>
-              {/* —— Connection Quality: animated bars + speed text —— */}
-              <ConnectionQualityBars />
+
+              <View style={styles.liveBadge}>
+                <View style={styles.liveDot} />
+                <Text style={styles.liveText}>READY</Text>
+              </View>
             </View>
           </SafeAreaView>
         </View>
 
+        <View style={styles.dashboardInfoBar}>
+          <View style={styles.peerInfoBox}>
+            <Icon name="speedometer" size={14} color="#64748B" />
+            <Text style={styles.peerNameText}>Transfer Rate</Text>
+          </View>
+          <View style={styles.speedBadgeBox}>
+            <Text style={styles.speedBadgeText}>{stats.transferSpeed || 'STANDING BY'}</Text>
+          </View>
+        </View>
+
         <View style={styles.content}>
-          <View style={[styles.listCard, { backgroundColor: colors.surface, ...layout.shadow.medium }]}>
-            {/* ── Completed summary banner ── */}
-            {(() => {
-              const all = Object.values(files) as FileItem[];
-              const done = all.filter(f => f.status === 'completed');
-              if (done.length === 0) return null;
-              const doneBytes = done.reduce((s, f) => s + f.size, 0);
-              return (
-                <View style={[styles.completedBanner, { backgroundColor: colors.success + '12', borderBottomColor: colors.success + '20' }]}>
-                  <View style={[styles.completedDot, { backgroundColor: colors.success }]} />
-                  <Text style={[styles.completedBannerText, { color: colors.success, fontFamily: typography.fontFamily }]}>
-                    {done.length} of {all.length} completed
-                  </Text>
-                  <Text style={[styles.completedBannerSize, { color: colors.success + 'BB', fontFamily: typography.fontFamily }]}>
-                    · {formatSize(doneBytes)}
-                  </Text>
-                  <View style={[styles.completedCheckBadge, { backgroundColor: colors.success }]}>
-                    <Icon name="check" size={10} color="#FFF" />
-                  </View>
-                </View>
-              );
-            })()}
             <FlatList
-              data={sortedFiles}
+              data={Object.values(files)}
               renderItem={renderItem}
               keyExtractor={item => item.name}
-              contentContainerStyle={styles.listContent}
+              contentContainerStyle={{ paddingTop: 10, paddingBottom: 20 }}
               showsVerticalScrollIndicator={false}
               ListEmptyComponent={() => (
-                <FileCardSkeleton count={4} isDark={isDark} />
+                <View style={styles.dashedEmpty}>
+                  <Icon name="wechat" size={36} color="#94A3B8" />
+                  <Text style={styles.emptyText}>Waiting for files...</Text>
+                </View>
               )}
             />
-          </View>
+        </View>
 
           {/* ── Banner Ad — file list ke neeche, buttons ke upar ── */}
           {DisplayAds && (
-            <View style={styles.bannerAdContainer}>
+            <View style={{ alignItems: 'center', backgroundColor: colors.surface, paddingVertical: 4 }}>
               <BannerAd
                 unitId={__DEV__ ? TestIds.ADAPTIVE_BANNER : ProdIDs.ADAPTIVE_BANNER}
-                size={BannerAdSize.ADAPTIVE_BANNER}
+                size={BannerAdSize.ANCHORED_ADAPTIVE_BANNER}
                 requestOptions={{ requestNonPersonalizedAdsOnly: false }}
               />
             </View>
           )}
 
-          <View style={styles.footer}>
-            {/* Stats cards row */}
-            <View style={styles.statsRow}>
-              <View style={[styles.statCard, { backgroundColor: isDark ? colors.surface : colors.background, borderColor: colors.border }]}>
-                <Icon name="clock-fast" size={14} color={colors.accent} style={{ marginBottom: 3 }} />
-                <Text style={[styles.statCardValue, { color: colors.text, fontFamily: typography.fontFamily }]}>{stats.leftData}</Text>
-                <Text style={[styles.statCardLabel, { color: colors.subtext, fontFamily: typography.fontFamily }]}>Remaining</Text>
+          <View style={{ backgroundColor: colors.surface }}>
+            {/* Very slim generic progress bar only when transferring */}
+            {Object.values(files).some(f => f.status === 'uploading' || f.status === 'downloading') && (
+              <View style={[styles.overallBar, { backgroundColor: isDark ? '#2A2A2A' : '#E2E8F0' }]}>
+                <Animated.View style={[styles.overallFill, { backgroundColor: colors.primary, width: `${(stats.overallProgress || 0) * 100}%` as any }]} />
               </View>
-              <View style={[styles.statCard, { backgroundColor: isDark ? colors.surface : colors.background, borderColor: colors.border }]}>
-                <Icon name="timer-outline" size={14} color={colors.primary} style={{ marginBottom: 3 }} />
-                <Text style={[styles.statCardValue, { color: colors.text, fontFamily: typography.fontFamily }]}>{stats.eta}</Text>
-                <Text style={[styles.statCardLabel, { color: colors.subtext, fontFamily: typography.fontFamily }]}>ETA</Text>
-              </View>
-              <View style={[styles.statCard, { backgroundColor: isDark ? colors.surface : colors.background, borderColor: colors.border }]}>
-                <Icon name="harddisk" size={14} color={colors.secondary} style={{ marginBottom: 3 }} />
-                <Text style={[styles.statCardValue, { color: colors.text, fontFamily: typography.fontFamily }]}>{stats.freeSpace || '—'}</Text>
-                <Text style={[styles.statCardLabel, { color: colors.subtext, fontFamily: typography.fontFamily }]}>Free</Text>
-              </View>
-            </View>
-
-            {/* Overall progress bar with percentage label */}
-            <View style={{ marginBottom: 20 }}>
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 }}>
-                <Text style={[{ fontSize: 12, color: colors.subtext, fontFamily: typography.fontFamily }]}>Overall Progress</Text>
-                <Text style={[{ fontSize: 12, fontWeight: '700', color: colors.text, fontFamily: typography.fontFamily }]}>
-                  {Math.round((stats.overallProgress || 0) * 100)}%
-                </Text>
-              </View>
-              <View style={[styles.overallProgressBarBg, { backgroundColor: colors.border }]}>
-                <LinearGradient
-                  colors={colors.gradient}
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 0 }}
-                  style={[styles.overallProgressBarFill, { width: `${(stats.overallProgress || 0) * 100}%` }]}
-                />
-              </View>
-            </View>
-
-            <View style={styles.actionButtons}>
-              {Object.values(files).some(f => f.status === 'uploading' || f.status === 'downloading' || f.status === 'pending') && (
-                <TouchableOpacity
-                  style={[styles.cancelBtnBatch, { backgroundColor: colors.warning + '18', borderWidth: 1.5, borderColor: colors.warning + '40' }]}
-                  onPress={handleCancel}
-                >
-                  <Icon name="close-circle-outline" size={18} color={colors.warning} />
-                  <Text style={[styles.cancelText, { color: colors.warning, fontFamily: typography.fontFamily }]}>Cancel</Text>
-                </TouchableOpacity>
-              )}
-
-              {Object.values(files).some(f => f.status === 'error') && (
-                <TouchableOpacity
-                  style={[styles.retryBtn, { backgroundColor: colors.primary + '15', borderWidth: 1.5, borderColor: colors.primary + '40' }]}
-                  onPress={handleRetry}
-                >
-                  <Icon name="refresh" size={18} color={colors.primary} />
-                  <Text style={[styles.retryText, { color: colors.primary, fontFamily: typography.fontFamily }]}>Retry Failed</Text>
-                </TouchableOpacity>
-              )}
-
-              <TouchableOpacity
-                style={[styles.sendMoreBtn, { borderColor: colors.primary + '60', backgroundColor: colors.primary + '10' }]}
-                onPress={() => (navigation as any).navigate('Send', {
-                  keepConnection: true,
-                  currentRole: role,
-                  peerDevice: deviceName
-                })}
-              >
-                <Icon name="plus" size={18} color={colors.primary} />
-                <Text style={[styles.sendMoreText, { color: colors.primary, fontFamily: typography.fontFamily }]}>Send More</Text>
-              </TouchableOpacity>
-            </View>
-
-            {/* Disconnect & Exit — only shown when NOT actively transferring */}
-            {!Object.values(files).some(f => f.status === 'uploading' || f.status === 'downloading') && (
-              <TouchableOpacity
-                style={[styles.disconnectFullBtn, { borderColor: colors.error }]}
-                onPress={handleDisconnect}
-              >
-                <Icon name="power" size={20} color={colors.error} />
-                <Text style={[styles.disconnectText, { color: colors.error, fontFamily: typography.fontFamily }]}>Disconnect & Exit</Text>
-              </TouchableOpacity>
             )}
-          </View>
+
+            <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingTop: 12, paddingBottom: Math.max(insets.bottom, 20), borderTopWidth: 1, borderTopColor: colors.border }}>
+                
+                {/* Left Button: Send More / Retry */}
+                {Object.values(files).some(f => f.status === 'error') && !Object.values(files).some(f => f.status === 'uploading' || f.status === 'downloading') ? (
+                  <TouchableOpacity
+                    style={[styles.actionBtn, { backgroundColor: colors.primary, flex: 1, marginRight: 10 }]}
+                    onPress={handleRetry}
+                    activeOpacity={0.85}
+                  >
+                    <Icon name="refresh" size={18} color="#FFF" style={{ paddingLeft: 4 }} />
+                    <Text style={[styles.actionBtnText, { fontFamily: typography.fontFamily }]}>
+                      Retry Failed
+                    </Text>
+                  </TouchableOpacity>
+                ) : (
+                  <TouchableOpacity
+                    style={[styles.actionBtn, { backgroundColor: colors.primary, flex: 1, marginRight: 10 }]}
+                    onPress={() => (navigation as any).navigate('Send', { keepConnection: true, currentRole: role, peerDevice: deviceName })}
+                    activeOpacity={0.85}
+                  >
+                    <Icon name="plus" size={18} color="#FFF" style={{ paddingLeft: 4 }} />
+                    <Text style={[styles.actionBtnText, { fontFamily: typography.fontFamily }]}>
+                      Send More
+                    </Text>
+                  </TouchableOpacity>
+                )}
+
+                {/* Right Button: Cancel / Disconnect */}
+                {Object.values(files).some(f => f.status === 'uploading' || f.status === 'downloading' || f.status === 'pending') ? (
+                  <TouchableOpacity
+                    style={[
+                      styles.actionBtn,
+                      {
+                        backgroundColor: isDark ? 'rgba(255,193,7,0.12)' : '#FFF8E1',
+                        borderWidth: 1,
+                        borderColor: colors.warning + '40',
+                        flex: 1,
+                      },
+                    ]}
+                    onPress={handleCancel}
+                    activeOpacity={0.85}
+                  >
+                    <Icon name="close-circle-outline" size={20} color={colors.warning} />
+                    <Text style={[styles.actionBtnText, { color: colors.warning, fontFamily: typography.fontFamily }]}>
+                      Cancel
+                    </Text>
+                  </TouchableOpacity>
+                ) : (
+                  <TouchableOpacity
+                    style={[
+                      styles.actionBtn,
+                      {
+                        backgroundColor: isDark ? 'rgba(255,71,87,0.12)' : '#FFEBEE',
+                        borderWidth: 1,
+                        borderColor: colors.error + '40',
+                        flex: 1,
+                      },
+                    ]}
+                    onPress={handleDisconnect}
+                    activeOpacity={0.85}
+                  >
+                    <Icon name="power" size={20} color={colors.error} />
+                    <Text style={[styles.actionBtnText, { color: colors.error, fontFamily: typography.fontFamily }]}>
+                      Exit
+                    </Text>
+                  </TouchableOpacity>
+                )}
+            </View>
         </View>
-      </View>
 
       {/* ── #7 Celebration Overlay ─────────────────────────────── */}
       {showCelebration && (
@@ -1055,118 +946,207 @@ const FileTransferScreen = () => {
           </Animated.Text>
         </Animated.View>
       )}
-    </>
+      </View>
   );
 };
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
+  // ── Header (PC Style) ──
   headerWrapper: {
-    height: 145,
     backgroundColor: 'transparent',
+    zIndex: 10,
+    paddingBottom: 20,
   },
   headerGradient: {
     ...StyleSheet.absoluteFillObject,
     borderBottomLeftRadius: 28,
     borderBottomRightRadius: 28,
   },
-  headerGlowTop: {
-    position: 'absolute',
-    top: -40,
-    right: -30,
-    width: 160,
-    height: 160,
-    borderRadius: 80,
-    backgroundColor: 'rgba(255,255,255,0.07)',
-  },
-  headerGlowBottom: {
-    position: 'absolute',
-    bottom: -20,
-    left: -20,
-    width: 110,
-    height: 110,
-    borderRadius: 55,
-    backgroundColor: 'rgba(255,255,255,0.05)',
-  },
   headerContent: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
     paddingHorizontal: 20,
-    paddingTop: Platform.OS === 'android' ? 52 : 22,
-    paddingBottom: 16,
+    paddingTop: Platform.OS === 'android' ? 50 : 20,
+    paddingBottom: 18,
   },
-  iconButton: {
-    width: 38,
-    height: 38,
-    justifyContent: 'center',
+  iconBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255,255,255,0.15)',
     alignItems: 'center',
-    borderRadius: 12,
-    backgroundColor: 'rgba(255,255,255,0.18)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
+    justifyContent: 'center',
   },
   headerTitle: {
-    fontSize: 22,
+    fontSize: 20,
     fontWeight: '800',
     color: '#FFF',
     letterSpacing: -0.3,
   },
-  headerSubtitle: {
-    fontSize: 13,
-    marginTop: 2,
-    fontWeight: '500',
+  headerSub: {
+    fontSize: 12,
+    color: 'rgba(255,255,255,0.65)',
+    marginTop: 1,
+  },
+  liveBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,200,100,0.22)',
+    borderRadius: 20,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    gap: 5,
+    borderWidth: 1,
+    borderColor: 'rgba(0,255,120,0.3)',
   },
   liveDot: {
     width: 7,
     height: 7,
     borderRadius: 4,
-    backgroundColor: '#4ADE80',
-    shadowColor: '#4ADE80',
-    shadowOpacity: 0.8,
-    shadowRadius: 4,
-    shadowOffset: { width: 0, height: 0 },
-    elevation: 4,
+    backgroundColor: '#00E676',
   },
-  deviceBadge: {
-    width: 18,
-    height: 18,
-    borderRadius: 5,
-    backgroundColor: 'rgba(255,255,255,0.18)',
+  liveText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#00E676',
+    letterSpacing: 1,
+  },
+  dashboardInfoBar: {
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: '#F8FAFC',
+  },
+  peerInfoBox: { flexDirection: 'row', alignItems: 'center' },
+  peerNameText: { color: '#64748B', fontSize: 12, marginLeft: 6, fontWeight: '600' },
+  speedBadgeBox: {
+    backgroundColor: '#FFF',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  speedBadgeText: { fontSize: 10, fontWeight: '700', color: '#1E293B' },
+  content: {
+    flex: 1,
+    paddingHorizontal: 16,
+  },
+  chatBubbleWrapper: {
+    width: '80%',
+    marginBottom: 10,
+  },
+  chatBubbleLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    marginBottom: 3,
+    letterSpacing: 0.3,
+  },
+  chatBubble: {
+    borderRadius: 16,
+    padding: 12,
+    width: '100%',
+    borderWidth: 1,
+  },
+  chatBubbleDone: {
+    borderRadius: 16,
+    padding: 12,
+    borderWidth: 1,
+  },
+  chatBubbleTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    width: '100%',
+    marginBottom: 8,
+  },
+  chatFileIcon: {
+    width: 28,
+    height: 28,
+    borderRadius: 8,
     alignItems: 'center',
     justifyContent: 'center',
+    flexShrink: 0,
   },
-  // Connection quality badge
+  chatFileName: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  chatPercent: {
+    fontSize: 13,
+    fontWeight: '800',
+    minWidth: 38,
+    textAlign: 'right',
+  },
+  chatBarBg: {
+    height: 5,
+    borderRadius: 3,
+    overflow: 'hidden',
+    marginBottom: 6,
+  },
+  chatBarFill: {
+    height: '100%',
+    borderRadius: 3,
+  },
+  chatSizeText: {
+    fontSize: 10,
+    fontWeight: '500',
+  },
+  dashedEmpty: {
+    borderWidth: 2,
+    borderStyle: 'dashed',
+    borderColor: '#E2E8F0',
+    borderRadius: 16,
+    paddingVertical: 32,
+    alignItems: 'center',
+    backgroundColor: '#FAFAFA',
+  },
+  emptyHistory: { alignItems: 'center', paddingVertical: 20 },
+  emptyText: { color: '#94A3B8', fontWeight: '500', marginTop: 8 },
+  overallBar: {
+    height: 3,
+    width: '100%',
+  },
+  overallFill: {
+    height: '100%',
+  },
+  actionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 14,
+    borderRadius: 16,
+  },
+  actionBtnText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#FFF',
+  },
+  retryText: { color: '#2563EB', fontSize: 13, fontWeight: '600' },
   connQualityBadge: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-    borderRadius: 20,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 12,
     borderWidth: 1,
   },
-  barsRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    gap: 3,
-    height: 28,
-  },
-  signalBar: {
-    width: 5,
-    borderRadius: 3,
-  },
-  // Celebration overlay
+  barsRow: { flexDirection: 'row', alignItems: 'flex-end', gap: 3, height: 28 },
+  signalBar: { width: 4, borderRadius: 2 },
   celebrationOverlay: {
+    ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: 'rgba(0,0,0,0.6)',
     zIndex: 999,
   },
-  confettiEmoji: {
-    position: 'absolute',
-    fontSize: 32,
-  },
+  confettiEmoji: { position: 'absolute', fontSize: 32 },
   celebrationCircle: {
     width: 140,
     height: 140,
@@ -1187,227 +1167,6 @@ const styles = StyleSheet.create({
     textShadowColor: 'rgba(0,0,0,0.4)',
     textShadowOffset: { width: 0, height: 2 },
     textShadowRadius: 8,
-  },
-  content: {
-    flex: 1,
-    paddingHorizontal: 16,
-    marginTop: -28,
-  },
-  listCard: {
-    flex: 1,
-    borderRadius: 24,
-    padding: 4,
-    borderWidth: 1,
-    borderColor: 'rgba(0,0,0,0.04)',
-  },
-  listContent: { paddingHorizontal: 14, paddingVertical: 10 },
-  fileCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 20,
-    paddingVertical: 2,
-  },
-  thumbnailContainer: {
-    width: 52,
-    height: 52,
-    borderRadius: 14,
-    overflow: 'hidden',
-  },
-  thumbnail: { width: '100%', height: '100%' },
-  playIconOverlay: { ...StyleSheet.absoluteFillObject, justifyContent: 'center', alignItems: 'center' },
-  playIconBg: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingLeft: 2,
-  },
-  iconContainer: {
-    width: 52,
-    height: 52,
-    borderRadius: 14,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  fileDetails: { flex: 1, marginLeft: 14 },
-  fileHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: 9,
-  },
-  fileName: {
-    fontSize: 14,
-    fontWeight: '700',
-    lineHeight: 18,
-  },
-  fileSize: {
-    fontSize: 11,
-    fontWeight: '500',
-    marginTop: 2,
-  },
-  statusCheckBadge: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  openBtn: {
-    paddingHorizontal: 9,
-    paddingVertical: 4,
-    borderRadius: 8,
-    borderWidth: 1.5,
-  },
-  pendingBadge: {
-    width: 26,
-    height: 26,
-    borderRadius: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1.5,
-  },
-  progressContainer: { height: 5, borderRadius: 4, overflow: 'hidden' },
-  progressBarBg: { flex: 1 },
-  progressBarFill: { height: '100%', borderRadius: 4 },
-  footer: { paddingTop: 16, paddingBottom: 20 },
-  // Stat cards row
-  statsRow: {
-    flexDirection: 'row',
-    gap: 10,
-    marginBottom: 16,
-  },
-  statCard: {
-    flex: 1,
-    borderRadius: 16,
-    paddingVertical: 12,
-    paddingHorizontal: 10,
-    alignItems: 'center',
-    borderWidth: 1,
-  },
-  statCardValue: {
-    fontSize: 13,
-    fontWeight: '800',
-    letterSpacing: -0.2,
-  },
-  statCardLabel: {
-    fontSize: 10,
-    fontWeight: '600',
-    marginTop: 2,
-    letterSpacing: 0.3,
-    textTransform: 'uppercase',
-  },
-  // Legacy stat items (kept for safety)
-  statItem: { flexDirection: 'row', alignItems: 'center' },
-  statDot: { width: 8, height: 8, borderRadius: 4, marginRight: 8 },
-  statLabel: { fontSize: 13 },
-  overallProgressBarBg: { height: 7, borderRadius: 6, overflow: 'hidden', marginBottom: 20 },
-  overallProgressBarFill: { height: '100%', borderRadius: 6 },
-  actionButtons: { flexDirection: 'row', gap: 12 },
-  disconnectBtn: {
-    flex: 1,
-    height: 50,
-    borderRadius: 16,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  disconnectText: { fontSize: 15, fontWeight: '700' },
-  sendMoreBtn: {
-    flex: 1,
-    height: 48,
-    borderRadius: 14,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1.5,
-    flexDirection: 'row',
-    gap: 7,
-  },
-  sendMoreText: { fontSize: 15, fontWeight: '700' },
-  cancelBtnBatch: {
-    flex: 1,
-    height: 48,
-    borderRadius: 14,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 7,
-  },
-  cancelText: { fontSize: 15, fontWeight: '700' },
-  retryBtn: {
-    flex: 1,
-    height: 48,
-    borderRadius: 14,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 7,
-  },
-  retryText: { fontSize: 15, fontWeight: '700' },
-  disconnectFullBtn: {
-    height: 48,
-    width: '100%',
-    alignItems: 'center',
-    justifyContent: 'center',
-    flexDirection: 'row',
-    borderWidth: 1.5,
-    borderRadius: 14,
-    marginTop: 12,
-    gap: 8,
-  },
-  // Completed summary banner
-  completedBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    gap: 7,
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-  },
-  completedDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-  },
-  completedBannerText: {
-    fontSize: 12,
-    fontWeight: '700',
-    letterSpacing: 0.2,
-  },
-  completedBannerSize: {
-    fontSize: 12,
-    fontWeight: '500',
-  },
-  completedCheckBadge: {
-    width: 20,
-    height: 20,
-    borderRadius: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginLeft: 'auto' as any,
-  },
-  speedBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#FFF',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 20,
-  },
-  speedText: {
-    fontSize: 12,
-    fontWeight: '700',
-    marginLeft: 6,
-  },
-  bannerAdContainer: {
-    alignItems: 'center',
-    marginTop: 10,
-    marginBottom: 4,
-    borderRadius: 12,
-    overflow: 'hidden',
   },
 });
 

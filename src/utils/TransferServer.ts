@@ -106,7 +106,7 @@ export class TransferServer {
     tracker: SpeedTracker,
     encrypted = false,
   ) {
-    const CHUNK = encrypted ? 256 * 1024 : 1024 * 1024;
+    const CHUNK = encrypted ? 2 * 1024 * 1024 : 4 * 1024 * 1024;
     let offset = startByte;
     let lastReport = startByte;
     tracker.begin(startByte);
@@ -128,7 +128,7 @@ export class TransferServer {
           socket.write(data);
           offset += cs;
 
-          if (offset - lastReport >= 512 * 1024 || offset > endByte) {
+          if (offset - lastReport >= 5 * 1024 * 1024 || offset > endByte) {
             lastReport = offset;
             this.emitProgress(label, offset, fileSize, 'progress', tracker);
           }
@@ -153,14 +153,20 @@ export class TransferServer {
 
     return new Promise<void>(async (resolve, reject) => {
       try {
-        const stream = await ReactNativeBlobUtil.fs.readStream(currentPath, 'ascii', 1024 * 1024, 5);
+        // STABLE MAX SPEED: 512KB chunks for bridge stability, 0ms delay for throughput.
+        // Smaller chunks allow the JS event loop to process other tasks (like drain) better.
+        const stream = await ReactNativeBlobUtil.fs.readStream(currentPath, 'ascii', 512 * 1024, 0);
         stream.onData((chunk) => {
-          if (socket.destroyed) return;
-          const data = Buffer.from(chunk as string, 'binary');
-          socket.write(data);
+          if (socket.destroyed) {
+            return;
+          }
+          const data = chunk as string;
+          // Binary write to TCP socket
+          socket.write(data, 'binary');
+          
           offset += data.length;
-
-          if (offset - lastReport >= 1024 * 1024) {
+          // Report every 5MB to minimize bridge traffic under high load
+          if (offset - lastReport >= 5 * 1024 * 1024) {
             lastReport = offset;
             this.emitProgress(label, offset, fileSize, 'progress', tracker);
           }
@@ -192,14 +198,18 @@ export class TransferServer {
     this.secretKey = secretKey;
     if (this.server) return { port };
 
+    // No longer using `WifiManager.forceWifiUsage(true)`. On Android 10+, it forces 
+    // traffic onto the legacy `wlan0` interface instead of Wi-Fi Direct's `p2p0`, 
+    // effectively isolating the Sender and preventing any inbound TCP connections.
+
     this.server = TcpSocket.createServer((socket: any) => {
       try { socket.setKeepAlive(true); } catch (_) { }   // no delay param — RN tcp-socket ignores it
       try { socket.setNoDelay(true); } catch (_) { }
 
-      const addr: any = socket.address();
-      const clientIp = typeof addr === 'string' ? addr : (addr?.address ?? 'unknown');
+      const clientIp = socket.remoteAddress || 'unknown';
       if (!this.connectedClients.has(clientIp)) {
         this.connectedClients.add(clientIp);
+        console.log(`[TransferServer] Client connected: ${clientIp}`);
         this.statusCallback?.({ type: 'client_connected', clientAddress: clientIp });
       }
 
@@ -217,17 +227,38 @@ export class TransferServer {
 
       const parse = () => {
         if (socket.destroyed) return;
-        // Consolidate buffers into one for indexOf scanning
-        const buf = rxBufs.length > 1 ? (() => { const b = Buffer.concat(rxBufs, rxLen); rxBufs = [b]; return b; })() : (rxBufs[0] || Buffer.alloc(0));
+        
+        // OPTIMIZATION: Only consolidate if we don't have enough to look for headers (usually < 4KB)
+        // This prevents re-copying the entire body of large uploads hundreds of times per chunk.
+        if (rxLen > 16384 && rxBufs.length > 3) {
+           // We already have headers if we got > 16KB usually. Just peek at the first buffer for headers.
+        }
+
+        const buf = rxBufs.length > 1 ? (() => { 
+          // If rxLen is huge (e.g. 1MB body), we ONLY need the first few KB to find headers.
+          // Don't concat the whole thing every time!
+          if (rxLen > 32768) {
+             const headBuf = Buffer.concat(rxBufs, 32768); 
+             return headBuf;
+          }
+          const b = Buffer.concat(rxBufs, rxLen); 
+          rxBufs = [b]; 
+          return b; 
+        })() : (rxBufs[0] || Buffer.alloc(0));
+
         const hEnd = buf.indexOf(SEP);
         if (hEnd === -1) return;
-        const headerStr = buf.slice(0, hEnd).toString('utf8');
+        
+        // Now that we found headers, use the REAL full buffer to extract them
+        const fullBuf = rxBufs.length > 1 ? Buffer.concat(rxBufs, rxLen) : rxBufs[0];
+        const headerStr = fullBuf.slice(0, hEnd).toString('utf8');
         const cl = headerStr.match(/Content-Length:\s*(\d+)/i);
         const bodyLen = cl ? parseInt(cl[1]) : 0;
         const totalLen = hEnd + 4 + bodyLen;
+        
         if (rxLen < totalLen) return;
-        const body = buf.slice(hEnd + 4, totalLen);
-        const rest = buf.slice(totalLen);
+        const body = fullBuf.slice(hEnd + 4, totalLen);
+        const rest = fullBuf.slice(totalLen);
         rxBufs = rest.length ? [rest] : []; rxLen = rest.length;
         chain = chain.then(() => handle(headerStr, body)).catch(e => console.error('[Server] error:', e));
         if (rxLen > 0) parse(); // handle pipelining
@@ -257,17 +288,17 @@ export class TransferServer {
             try { await ReactNativeBlobUtil.fs.unlink(tempPath); } catch (_) { }
             await ReactNativeBlobUtil.fs.writeFile(tempPath, '', 'utf8').catch(() => { });
 
-            // Use writeStream for much faster uploads
-            const stream = await ReactNativeBlobUtil.fs.writeStream(tempPath, 'ascii', false);
+            // Use writeStream for much faster uploads with base64 for best bridge performance
+            const stream = await ReactNativeBlobUtil.fs.writeStream(tempPath, 'base64', false);
             this.upload = { active: true, finalized: false, fileName, fileSize, received: 0, tempPath, finalPath, writeQueue: Promise.resolve(), tracker: new SpeedTracker(), stream };
             this.upload.tracker.begin(0);
           }
-
+ 
           if (body.length > 0 && this.upload.stream) {
             if (offset === 0) this.upload.received = 0;
             this.upload.received += body.length;
             const snapReceived = this.upload.received;
-            const snapData = body.toString('binary'); // convert Buffer to raw string for ascii write
+            const snapData = body.toString('base64'); // base64 is faster for raw bytes in RN bridge
 
             // ✅ Emit progress INSTANTLY before anything else — live UI
             this.emitProgress(fileName, snapReceived, fileSize, 'upload_progress', this.upload.tracker);

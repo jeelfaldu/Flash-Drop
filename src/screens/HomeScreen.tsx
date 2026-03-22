@@ -8,6 +8,7 @@ import { useConnectionStore } from '../store';
 import { requestConnectPermissions } from '../utils/permissionHelper';
 import { BannerAd, BannerAdSize, TestIds } from 'react-native-google-mobile-ads';
 import { DisplayAds, ProdIDs } from '../utils/Constant';
+import HapticUtil from '../utils/HapticUtil';
 
 const adUnitId = __DEV__ ? TestIds.ADAPTIVE_BANNER : ProdIDs.ADAPTIVE_BANNER;
 
@@ -60,7 +61,10 @@ const HomeScreen = ({ navigation }: any) => {
     return (
       <TouchableOpacity
         activeOpacity={0.9}
-        onPress={onPress}
+        onPress={() => {
+          HapticUtil.light();
+          if (onPress) onPress();
+        }}
         style={[
           styles.dashboardCard,
           {
@@ -127,7 +131,7 @@ const HomeScreen = ({ navigation }: any) => {
                 <Text style={[styles.headerSubtitle, { fontFamily: typography.fontFamily }]}>Fastest File Transfer</Text>
               </View>
             </View>
-            <TouchableOpacity onPress={toggleTheme} style={styles.iconButton}>
+            <TouchableOpacity onPress={() => { HapticUtil.light(); toggleTheme(); }} style={styles.iconButton}>
               <Icon name={isDark ? "weather-sunny" : "weather-night"} size={20} color="#FFF" />
             </TouchableOpacity>
           </View>
@@ -159,7 +163,7 @@ const HomeScreen = ({ navigation }: any) => {
                   Ready to transfer
                 </Text>
               </View>
-              <TouchableOpacity onPress={resetConnection} activeOpacity={0.7} style={[styles.disconnectBtn, { backgroundColor: isDark ? 'rgba(244, 67, 54, 0.15)' : '#FFEBEE' }]}>
+              <TouchableOpacity onPress={() => { HapticUtil.light(); resetConnection(); }} activeOpacity={0.7} style={[styles.disconnectBtn, { backgroundColor: isDark ? 'rgba(244, 67, 54, 0.15)' : '#FFEBEE' }]}>
                 <Text style={[styles.disconnectText, { color: isDark ? '#EF5350' : '#D32F2F', fontFamily: typography.fontFamily }]}>Disconnect</Text>
               </TouchableOpacity>
             </View>
@@ -224,21 +228,21 @@ const HomeScreen = ({ navigation }: any) => {
           </View>
 
           <View style={[styles.quickActionCard, { backgroundColor: isDark ? colors.surface : colors.surface, borderColor: isDark ? colors.border : '#F0F0F0', ...layout.shadow.medium }]}>
-            <TouchableOpacity style={styles.quickActionItem} onPress={() => navigation.navigate('Sharing', { items: [], mode: 'pairing' })}>
+            <TouchableOpacity style={styles.quickActionItem} onPress={() => { HapticUtil.light(); navigation.navigate('Sharing', { items: [], mode: 'pairing' }); }}>
               <View style={[styles.quickActionIcon, { backgroundColor: isDark ? '#4A148C' : '#F3E5F5' }]}>
                 <Icon name="qrcode" size={28} color={isDark ? '#CE93D8' : '#9C27B0'} />
               </View>
               <Text style={[styles.quickActionText, { color: colors.text }]}>Show QR</Text>
             </TouchableOpacity>
 
-            <TouchableOpacity style={styles.quickActionItem} onPress={() => navigation.navigate('Receive', { mode: 'connect' })}>
+            <TouchableOpacity style={styles.quickActionItem} onPress={() => { HapticUtil.light(); navigation.navigate('Receive', { mode: 'connect' }); }}>
               <View style={[styles.quickActionIcon, { backgroundColor: isDark ? '#004D40' : '#E0F2F1' }]}>
                 <Icon name="qrcode-scan" size={28} color={isDark ? '#80CBC4' : '#009688'} />
               </View>
               <Text style={[styles.quickActionText, { color: colors.text }]}>Scan QR</Text>
             </TouchableOpacity>
 
-            <TouchableOpacity style={styles.quickActionItem} onPress={() => navigation.navigate('PCConnection')}>
+            <TouchableOpacity style={styles.quickActionItem} onPress={() => { HapticUtil.light(); navigation.navigate('PCConnection'); }}>
               <View style={[styles.quickActionIcon, { backgroundColor: isDark ? '#0D47A1' : '#E3F2FD' }]}>
                 <Icon name="monitor-share" size={28} color={isDark ? '#90CAF9' : '#1976D2'} />
               </View>
@@ -261,7 +265,7 @@ const HomeScreen = ({ navigation }: any) => {
           <View style={styles.listContainer}>
             <TouchableOpacity
               style={[styles.listItem, { backgroundColor: isDark ? colors.surface : '#FFF' }]}
-              onPress={() => navigation.navigate('History')}
+              onPress={() => { HapticUtil.light(); navigation.navigate('History'); }}
             >
               <View style={[styles.listIcon, { backgroundColor: '#E0E0E0' }]}>
                 <Icon name="history" size={22} color="#616161" />

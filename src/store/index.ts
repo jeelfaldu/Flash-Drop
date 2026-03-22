@@ -124,8 +124,6 @@ export const useTransferStore = create<TransferState>()(
       // ⚠️ Do NOT persist isTransferring — it should always be false on app start.
       // Persisting it caused the overlay to appear even with no active connection.
       partialize: (state) => ({
-        role: state.role,
-        deviceName: state.deviceName,
         selectedItems: state.selectedItems
       }),
     }
@@ -148,35 +146,27 @@ interface ConnectionState {
   resetConnection: () => void;
 }
 
-export const useConnectionStore = create<ConnectionState>()(
-  persist(
-    (set) => ({
-      isConnected: false,
-      connectionType: null,
-      ipAddress: '',
-      ssid: '',
-      
-      setConnected: (connected) => set({ isConnected: connected }),
-      
-      setConnectionDetails: (details) => set({
-        connectionType: details.type,
-        ipAddress: details.ip || '',
-        ssid: details.ssid || ''
-      }),
-      
-      resetConnection: () => set({
-        isConnected: false,
-        connectionType: null,
-        ipAddress: '',
-        ssid: ''
-      }),
-    }),
-    {
-      name: 'connection-storage',
-      storage: createJSONStorage(() => AsyncStorage),
-    }
-  )
-);
+export const useConnectionStore = create<ConnectionState>()((set) => ({
+  isConnected: false,
+  connectionType: null,
+  ipAddress: '',
+  ssid: '',
+  
+  setConnected: (connected) => set({ isConnected: connected }),
+  
+  setConnectionDetails: (details) => set({
+    connectionType: details.type,
+    ipAddress: details.ip || '',
+    ssid: details.ssid || ''
+  }),
+  
+  resetConnection: () => set({
+    isConnected: false,
+    connectionType: null,
+    ipAddress: '',
+    ssid: ''
+  }),
+}));
 
 // Media store is in its own file for cleanliness
 export { useMediaStore } from './mediaStore';

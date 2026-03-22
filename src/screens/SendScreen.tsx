@@ -21,6 +21,8 @@ import { useTransferStore, useMediaStore, useUIStore, useConnectionStore } from 
 import TransferServer from '../utils/TransferServer';
 import { BannerAd, BannerAdSize, TestIds } from 'react-native-google-mobile-ads';
 import { DisplayAds, ProdIDs } from '../utils/Constant';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import HapticUtil from '../utils/HapticUtil';
 
 const adUnitId = __DEV__ ? TestIds.ADAPTIVE_BANNER : ProdIDs.ADAPTIVE_BANNER;
 
@@ -33,6 +35,7 @@ const { width } = Dimensions.get('window');
 
 const SendScreen = ({ navigation, route }: any) => {
   const { colors, typography, layout, spacing, isDark } = useTheme();
+  const { bottom } = useSafeAreaInsets();
 
   // Zustand stores
   const { selectedItems, toggleItem, clearSelection, setSelectedItems, setFiles, setTransferStats } = useTransferStore();
@@ -88,6 +91,7 @@ const SendScreen = ({ navigation, route }: any) => {
   }, [pickAndAddDocument, toggleItem]);
 
   const toggleSelection = useCallback((item: any) => {
+    HapticUtil.light();
     toggleItem(item);
   }, [toggleItem]);
 
@@ -100,40 +104,52 @@ const SendScreen = ({ navigation, route }: any) => {
   }, []);
 
   const handleSend = useCallback(() => {
-    if (selectedItems.length === 0) return;
+    if (selectedItems.length === 0) {
+      console.log(`[SendScreen] Send blocked: 0 files selected`);
+      return;
+    }
+    HapticUtil.medium();
     
-    if (isConnected) {
-      // If already connected, update server list directly
+    console.log(`[SendScreen] Send click triggered! Files selected: ${selectedItems.length}`);
+    
+    const { role: activeRole } = useTransferStore.getState();
+
+    if (isConnected || activeRole) {
+      console.log(`[SendScreen] Already in active session (${activeRole || 'connected'}). Routing directly to FileTransfer...`);
+      // If already connected or in a session, update server list directly
       TransferServer.updateFiles(selectedItems);
 
-      if (route.params?.keepConnection) {
-        // Manually update store and go back to existing FileTransfer screen
-        setFiles((prev: any) => {
-          const updated = { ...prev };
-          selectedItems.forEach((f: any) => {
-            // Use filename as key to avoid duplicates
-            if (!updated[f.name]) {
-              updated[f.name] = {
-                name: f.name,
-                size: f.size,
-                progress: 0,
-                status: 'pending',
-                type: f.type || 'file', // Ensure type exists
-                uri: f.uri // Ensure uri exists for thumbnail
-              };
-            }
-          });
-          return updated;
+      // Manually update store for UI feedback
+      setFiles((prev: any) => {
+        const updated = { ...prev };
+        selectedItems.forEach((f: any) => {
+          if (!updated[f.name]) {
+            updated[f.name] = {
+              id: f.name,
+              name: f.name,
+              size: f.size,
+              progress: 0,
+              status: 'pending',
+              type: f.type || 'file',
+              uri: f.uri
+            };
+          }
         });
+        return updated;
+      });
 
-        const addedSize = selectedItems.reduce((acc, item) => acc + item.size, 0);
-        setTransferStats((prev: any) => ({
-          ...prev,
-          totalSize: (prev.totalSize || 0) + addedSize
-        }));
+      const addedSize = selectedItems.reduce((acc, item) => acc + item.size, 0);
+      setTransferStats((prev: any) => ({
+        ...prev,
+        totalSize: (prev.totalSize || 0) + addedSize
+      }));
 
+      // If we came from FileTransfer, go back. Otherwise, navigate to it.
+      if (route.params?.keepConnection) {
+        console.log(`[SendScreen] keepConnection=true, returning via goBack()`);
         navigation.goBack();
       } else {
+        console.log(`[SendScreen] Navigating forward to FileTransfer`);
         navigation.navigate('FileTransfer', {
           role: 'sender',
           initialFiles: selectedItems,
@@ -141,6 +157,7 @@ const SendScreen = ({ navigation, route }: any) => {
         });
       }
     } else {
+      console.log(`[SendScreen] No active session. Pushing SharingScreen for P2P setup...`);
       navigation.navigate('Sharing', { items: selectedItems });
     }
 
@@ -150,6 +167,7 @@ const SendScreen = ({ navigation, route }: any) => {
   }, [selectedItems, isConnected, navigation, clearSelection, setFiles, setTransferStats, route.params]);
 
   const toggleDateSelection = useCallback((dateItems: any[]) => {
+    HapticUtil.light();
     const allSelected = dateItems.every(p => selectedItems.find(i => i.id === p.id));
     if (allSelected) {
       const idsToRemove = new Set(dateItems.map(p => p.id));
@@ -281,14 +299,26 @@ const SendScreen = ({ navigation, route }: any) => {
             borderTopColor: colors.border,
             opacity: selectedItems.length > 0 ? 1 : 0.5,
             transform: [{ translateY: footerSlideAnim }],
+            paddingBottom: Math.max(bottom, 20),
           }
         ]}
         pointerEvents={selectedItems.length === 0 ? 'none' : 'auto'}
       >
         <View style={styles.selectedInfo}>
-          <Text style={[styles.selectedCount, { color: colors.text, fontFamily: typography.fontFamily }]}>
-            {selectedItems.length > 0 ? `${selectedItems.length} Selected` : 'No files selected'}
-          </Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 2 }}>
+            <Text style={[styles.selectedCount, { color: colors.text, fontFamily: typography.fontFamily }]}>
+              {selectedItems.length > 0 ? `${selectedItems.length} Selected` : 'No files selected'}
+            </Text>
+            {selectedItems.length > 0 && (
+              <TouchableOpacity 
+                onPress={() => { HapticUtil.light(); clearSelection(); }} 
+                style={{ marginLeft: 10, backgroundColor: isDark ? '#333' : '#E2E8F0', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6 }}
+                activeOpacity={0.7}
+              >
+                <Text style={{ fontSize: 10, color: colors.subtext, fontWeight: '700' }}>CLEAR</Text>
+              </TouchableOpacity>
+            )}
+          </View>
           <Text style={[styles.selectedSize, { color: colors.subtext, fontFamily: typography.fontFamily }]}>
             {selectedItems.length > 0
               ? formatSize(selectedItems.reduce((acc, i) => acc + i.size, 0))

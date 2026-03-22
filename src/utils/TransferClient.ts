@@ -107,27 +107,50 @@ export class TransferClient {
     if (this.isProbing || this.shouldStop) return;
     this.isProbing = true;
 
-    if (Platform.OS === 'android') {
-      try { const W = require('react-native-wifi-reborn').default; await W.forceWifiUsage(true); } catch (_) { }
-    }
-
-    this.emit({ type: 'log', message: '🔍 Discovering sender...', connected: false });
+    // We let the OS determine the route rather than using forceWifiUsage, 
+    // because forceWifiUsage forces the wlan0 interface which blocks P2P traffic (p2p0 interface).
 
     let foundIp: string | null = null;
 
+    // CASE 1: Specific IP provided (Wi-Fi Direct / QR Scan)
     if (specificIp && specificIp !== '0.0.0.0' && specificIp !== '127.0.0.1') {
-      const myIp = await DeviceInfo.getIpAddress().catch(() => '');
-      if (specificIp !== myIp) {
-        this.emit({ type: 'log', message: `🎯 Trying known IP: ${specificIp}...`, connected: false });
-        for (let i = 0; i < 12 && !this.shouldStop; i++) {
-          if (await DiscoveryManager.probeTcpPort(specificIp, port, 3000)) { foundIp = specificIp; break; }
-          this.emit({ type: 'log', message: `⏳ Waiting for network... (${i + 1}/12)`, connected: false });
-          await new Promise(r => setTimeout(r, 2000));
+      this.emit({ type: 'log', message: `🎯 Connecting to ${specificIp}...`, connected: false });
+
+      // Wi-Fi Direct is point-to-point. If we have an IP, it's THE IP.
+      // We retry for 60 seconds because the server might still be booting or group owner transitioning.
+      console.log(`[TransferClient] Starting HTTP fetch probe sequence targeting ${specificIp}:${port} for up to 45 seconds`);
+      for (let i = 0; i < 30 && !this.shouldStop; i++) {
+        try {
+          const tcpOk = await DiscoveryManager.probeTcpPort(specificIp, port, 1500);
+          console.log(`[TransferClient] Probe attempt ${i + 1} - TCP socket ping: ${tcpOk ? 'Success' : 'Failed'}`);
+          
+          // Even if TCP failed, try HTTP directly (Android routing weirdness sometimes allows one but not the other)
+          const files = await this.fetchMetadata(specificIp, port);
+          if (files) {
+            console.log(`[TransferClient] Successfully reached Sender over HTTP at ${specificIp}:${port}`);
+            foundIp = specificIp;
+            this.currentFiles = files; // Pre-cache to save a network roundtrip later
+            break;
+          }
+        } catch (e: any) {
+          console.log(`[TransferClient] HTTP Probe attempt ${i + 1} failed: ${e.message}`);
         }
+        
+        this.emit({ type: 'log', message: `⏳ Waiting for sender... (${i + 1}/30)`, connected: false });
+        await new Promise(r => setTimeout(r, 1500));
+      }
+
+      if (!foundIp && !this.shouldStop) {
+        console.error(`[TransferClient] Exhausted all HTTP probes, server unreachable at ${specificIp}:${port}`);
+        this.emit({ type: 'log', message: '❌ Could not reach sender. Turn off Mobile Data & try again.', connected: false });
+        this.isProbing = false;
+        return;
       }
     }
 
+    // CASE 2: No IP provided, use mDNS/Scan discovery
     if (!foundIp && !this.shouldStop) {
+      this.emit({ type: 'log', message: '🔍 Discovering nearby senders...', connected: false });
       foundIp = await DiscoveryManager.discoverSender(port, msg => this.emit({ type: 'log', message: msg, connected: false }));
     }
 
@@ -136,11 +159,12 @@ export class TransferClient {
     if (foundIp && !this.shouldStop) {
       this.persistentLoop(foundIp, port, saveDir);
     } else if (!this.shouldStop) {
-      this.emit({ type: 'log', message: '❌ Sender not found. Make sure both devices are on the same Wi-Fi.', connected: false });
+      this.emit({ type: 'log', message: '❌ Discovery failed. Try scanning the QR code.', connected: false });
     }
   }
 
   private async persistentLoop(ip: string, port: number, saveDir: string) {
+    console.log(`[TransferClient] Starting persistent data loop pointing to ${ip}:${port}`);
     this.connectedIp = ip;
     this.connectedPort = port;
     this.emit({ type: 'connection', message: '✅ Connected!', connected: true });
@@ -149,6 +173,8 @@ export class TransferClient {
     while (!this.shouldStop) {
       try {
         const files = await this.fetchMetadata(ip, port);
+        if (failCount > 0) console.log(`[TransferClient] Metadata fetch completely restored after ${failCount} failures`);
+        if (files) console.log(`[TransferClient] Metadata fetched successfully! Sender has ${files.length} files queued.`);
         failCount = 0;
         this.currentFiles = files;
 
@@ -254,11 +280,13 @@ export class TransferClient {
       const task = ReactNativeBlobUtil.config({
         path: dest,
         overwrite: resumeFrom === 0,
+        // High-performance flags for mobile-to-mobile
+        fileCache: false,
       }).fetch('GET', downloadUrl, headers);
 
       this.activeJobs.set(file.name, task);
 
-      task.progress((received, totalCount) => {
+      task.progress({ interval: 500 }, (received, totalCount) => {
         const currentTotal = Number(totalCount);
         const receivedSoFar = resumeFrom + Number(received);
         const expectedTotal = total > 0 ? total : (currentTotal > 0 ? currentTotal + resumeFrom : receivedSoFar);

@@ -7,23 +7,30 @@ export const requestConnectPermissions = async () => {
     const apiLevel = await DeviceInfo.getApiLevel();
     
     // Core permissions for P2P + Contacts restore
-    const permissions = [
-      PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
-      PermissionsAndroid.PERMISSIONS.READ_CONTACTS,
-    ];
+    const permissions: string[] = [];
+
+    const fineLoc = PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION;
+    if (fineLoc) permissions.push(fineLoc);
+
+    const readContacts = PermissionsAndroid.PERMISSIONS.READ_CONTACTS;
+    if (readContacts) permissions.push(readContacts);
 
     if (apiLevel >= 33) { // Android 13+
-      permissions.push(
-        PermissionsAndroid.PERMISSIONS.NEARBY_WIFI_DEVICES,
-      );
+      const nearby = (PermissionsAndroid.PERMISSIONS as any).NEARBY_WIFI_DEVICES || 'android.permission.NEARBY_WIFI_DEVICES';
+      permissions.push(nearby);
     } else {
       // Android 12 and below
-      permissions.push(PermissionsAndroid.PERMISSIONS.READ_EXTERNAL_STORAGE);
-      permissions.push(PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE);
+      const readExt = PermissionsAndroid.PERMISSIONS.READ_EXTERNAL_STORAGE;
+      const writeExt = PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE;
+      if (readExt) permissions.push(readExt);
+      if (writeExt) permissions.push(writeExt);
     }
 
     try {
-      const granted = await PermissionsAndroid.requestMultiple(permissions);
+      const finalPerms = Array.from(new Set(permissions.filter(p => typeof p === 'string' && p.length > 0)));
+      if (finalPerms.length === 0) return true;
+
+      const granted: any = await PermissionsAndroid.requestMultiple(finalPerms as any);
 
       const isFineLocationGranted = granted[PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION] === PermissionsAndroid.RESULTS.GRANTED;
       const isContactsGranted = granted[PermissionsAndroid.PERMISSIONS.READ_CONTACTS] === PermissionsAndroid.RESULTS.GRANTED;
