@@ -68,6 +68,7 @@ export class TransferServer {
   }
   private currentContext: ServerContext | null = null;
   private currentPort = 8888;
+  private globalFileQueue = Promise.resolve();
   private connectedClients = new Set<string>();
   private peerIp: string | null = null;
   private peerServerPort = 8888;
@@ -189,11 +190,52 @@ export class TransferServer {
       let isBody = false;
       let bodyExpected = 0;
       let bodyReceived = 0;
+      let lastReportedBody = 0;
       let currentRequest: any = null;
+      let urlParams: any = null;
       let processingChain = Promise.resolve();
 
       socket.on('data', (chunk: Buffer) => {
-        socket.pause(); // Pause native data emission while we process
+        // PERFORMANCE: If we are collecting a POST body, just push to buffer. 
+        // Avoid bridge calls (pause/resume) and promise overhead for every 16KB packet.
+        if (isBody) {
+          rxBufs.push(chunk);
+          bodyReceived += chunk.length;
+          
+          // REAL-TIME REPORTING: Update UI as bytes arrive on network
+          if (bodyReceived - lastReportedBody > 256 * 1024 && urlParams) {
+            lastReportedBody = bodyReceived;
+            this.report({
+              type: 'upload_progress',
+              fileProgress: {
+                name: urlParams.name,
+                percent: Math.min(99, Math.floor(((urlParams.offset + bodyReceived) / urlParams.totalSize) * 100)),
+                sent: urlParams.offset + bodyReceived,
+                total: urlParams.totalSize
+              }
+            });
+          }
+
+          if (bodyReceived >= bodyExpected) {
+            const fullBody = Buffer.concat(rxBufs);
+            rxBufs = []; isBody = false;
+            
+            socket.pause();
+            processingChain = processingChain.then(async () => {
+              try {
+                if (currentRequest?.path.startsWith('/api/upload')) {
+                  await this.handleUploadChunk(socket, currentRequest, fullBody, true, true);
+                }
+              } finally {
+                if (socket.readyState === 'open') socket.resume();
+              }
+            });
+          }
+          return;
+        }
+
+        // Standard header parsing path (happens once per request)
+        socket.pause(); 
         processingChain = processingChain.then(async () => {
           try {
             if (!isBody) {
@@ -202,46 +244,51 @@ export class TransferServer {
               const buf = Buffer.concat(rxBufs, rxLen);
               const sep = buf.indexOf('\r\n\r\n');
               if (sep === -1) {
-                socket.resume();
+                if (socket.readyState === 'open') socket.resume();
                 return;
               }
 
               const headers = buf.slice(0, sep).toString();
               const bodyStart = buf.slice(sep + 4);
-
-              rxBufs = [];
-              rxLen = 0;
+              rxBufs = []; rxLen = 0;
 
               const lines = headers.split('\r\n');
               const [method, rawPath] = lines[0].split(' ');
               if (!method || !rawPath) {
-                socket.resume();
+                if (socket.readyState === 'open') socket.resume();
                 return;
               }
 
               const contentLengthMatch = headers.match(/Content-Length: (\d+)/i);
               const contentLength = contentLengthMatch ? parseInt(contentLengthMatch[1], 10) : 0;
-              
               currentRequest = { method, path: rawPath, headers };
 
               if (method === 'POST') {
-                isBody = true;
                 bodyExpected = contentLength;
                 bodyReceived = bodyStart.length;
-                if (rawPath.startsWith('/api/upload')) {
-                  await this.handleUploadChunk(socket, currentRequest, bodyStart, false, bodyReceived >= bodyExpected);
+                rxBufs = [bodyStart]; 
+                
+                // Prepare params for real-time progress
+                const name = decodeURIComponent(rawPath.match(/name=([^& ]+)/)?.[1] || 'unnamed');
+                const totalSize = parseInt(rawPath.match(/size=(\d+)/)?.[1] || '0', 10);
+                const offset = parseInt(rawPath.match(/offset=(\d+)/)?.[1] || '0', 10);
+                urlParams = { name, totalSize, offset };
+                lastReportedBody = bodyReceived;
+
+                if (bodyReceived >= bodyExpected) {
+                  const fullBody = Buffer.concat(rxBufs);
+                  if (rawPath.startsWith('/api/upload')) {
+                    await this.handleUploadChunk(socket, currentRequest, fullBody, false, true);
+                  }
+                  isBody = false; rxBufs = [];
+                } else {
+                  isBody = true; // Switch to fast-path for next packets
                 }
               } else {
                 this.handleGet(socket, currentRequest, remoteIp);
               }
-            } else {
-              bodyReceived += chunk.length;
-              if (currentRequest?.path.startsWith('/api/upload')) {
-                await this.handleUploadChunk(socket, currentRequest, chunk, true, bodyReceived >= bodyExpected);
-              }
             }
-            
-            // Only resume if we haven't already ended/destroyed the socket
+
             if (socket.readyState === 'open') {
               socket.resume();
             }
@@ -336,20 +383,27 @@ export class TransferServer {
     const tempPath = `${saveDir}/.tmp_${remoteIp.replace(/\./g, '_')}_${name}`;
 
     try {
-      if (chunk.length > 0) {
-        if (!(await ReactNativeBlobUtil.fs.exists(saveDir))) {
-          await ReactNativeBlobUtil.fs.mkdir(saveDir);
-        }
+      await this.globalFileQueue.then(async () => {
+        try {
+          if (chunk.length > 0) {
+            if (!(await ReactNativeBlobUtil.fs.exists(saveDir))) {
+              await ReactNativeBlobUtil.fs.mkdir(saveDir);
+            }
 
-        const dataBase64 = chunk.toString('base64');
-        if (!isContinued && offset === 0) {
-          await ReactNativeBlobUtil.fs.writeFile(tempPath, dataBase64, 'base64');
-        } else {
-          await ReactNativeBlobUtil.fs.appendFile(tempPath, dataBase64, 'base64');
+            const dataBase64 = chunk.toString('base64');
+            if (!isContinued && offset === 0) {
+              await ReactNativeBlobUtil.fs.writeFile(tempPath, dataBase64, 'base64');
+            } else {
+              await ReactNativeBlobUtil.fs.appendFile(tempPath, dataBase64, 'base64');
+            }
+          }
+        } catch (e) {
+          console.error('[handleUploadChunk] File Write Error:', e);
+          throw e;
         }
-      }
+      });
 
-      if (!isDone) return; 
+      if (!isDone) return;
 
       this.report({
         type: 'upload_progress',
@@ -363,14 +417,17 @@ export class TransferServer {
 
       if (isLast) {
         const finalPath = `${saveDir}/${name}`;
-        if (await ReactNativeBlobUtil.fs.exists(finalPath)) await ReactNativeBlobUtil.fs.unlink(finalPath);
-        await ReactNativeBlobUtil.fs.mv(tempPath, finalPath);
+        await this.globalFileQueue.then(async () => {
+          if (await ReactNativeBlobUtil.fs.exists(finalPath)) {
+            await ReactNativeBlobUtil.fs.unlink(finalPath);
+          }
+          await ReactNativeBlobUtil.fs.mv(tempPath, finalPath);
+        });
         this.report({ type: 'complete', message: `Received ${name}` });
         saveHistoryItem({ fileName: name, fileSize: totalSize, type: 'file', role: 'received', status: 'success' });
       }
 
       socket.end('HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
-
     } catch (e: any) {
       console.log('[UPLOAD ERROR]', e);
       socket.end('HTTP/1.1 500 Server Error\r\n\r\n');

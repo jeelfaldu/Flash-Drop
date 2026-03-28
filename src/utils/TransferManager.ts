@@ -8,6 +8,7 @@ import HapticUtil from './HapticUtil';
 class TransferManager {
   private static instance: TransferManager;
   private initialized = false;
+  private lastStoreUpdate = 0;
 
   private constructor() {}
 
@@ -36,18 +37,16 @@ class TransferManager {
   }
 
   private handleServerStatus(status: ServerStatus) {
-    if (status.context !== 'p2p') return; // 🛑 Ignore PC transfers
     if (status.type === 'progress' || status.type === 'upload_progress' || status.type === 'complete') {
       const fp = status.fileProgress;
-      if (fp) this.updateFileProgress(fp.name, fp.percent, fp.sent, fp.total, fp.speed, fp.etaSecs);
+      if (fp) this.updateFileProgress(fp.name, fp.percent, fp.sent, fp.total, status.context, fp.speed, fp.etaSecs);
     }
   }
 
   private handleClientStatus(status: TransferStatus) {
-    if (status.context !== 'p2p') return; // 🛑 Ignore PC transfers
     if ((status.type === 'progress' || status.type === 'complete') && status.fileProgress) {
       const fp = status.fileProgress;
-      this.updateFileProgress(fp.name, fp.percent, fp.received, fp.total, fp.speed, fp.etaSecs);
+      this.updateFileProgress(fp.name, fp.percent, fp.received, fp.total, status.context, fp.speed, fp.etaSecs);
     }
 
     if (status.files) {
@@ -93,10 +92,16 @@ class TransferManager {
     percent: number,
     currentSize: number,
     fileTotal?: number,
+    context?: 'pc' | 'p2p',
     speedBps?: number,
     etaSecs?: number
   ) {
     const { setFiles, setTransferStats, role } = useTransferStore.getState();
+    const now = Date.now();
+    const isImportant = percent === 100 || percent === 0 || (now - this.lastStoreUpdate > 500);
+    
+    if (!isImportant) return;
+    this.lastStoreUpdate = now;
 
     setFiles((prev) => {
       const updated = { ...prev };
@@ -105,6 +110,7 @@ class TransferManager {
           ...updated[name],
           size: (updated[name].size || 0) > 0 ? updated[name].size : (fileTotal || 0),
           progress: percent / 100,
+          context: context || updated[name].context || 'p2p',
           status: percent === 100 ? ('completed' as const) : (role === 'sender' ? 'uploading' as const : 'downloading' as const)
         };
       } else {
@@ -115,6 +121,7 @@ class TransferManager {
           size: fileTotal || 0,
           progress: percent / 100,
           type: 'file',
+          context: context || 'p2p',
           direction: role === 'sender' ? 'sent' : 'received',
           status: role === 'sender' ? ('uploading' as const) : ('downloading' as const)
         };

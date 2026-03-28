@@ -410,23 +410,22 @@ const FileTransferScreen = () => {
   };
 
   const fileList = useMemo(() => {
-    return Object.values(files).sort((a, b) => {
-      const getPriority = (status?: string) => {
-        if (status === 'uploading' || status === 'downloading') return 0;
-        if (status === 'pending') return 1;
-        if (status === 'completed') return 2;
-        return 3; // errors etc
-      };
+    return Object.values(files)
+      .filter(f => f.context === 'p2p' || !f.context) // 🛡️ Hide PC transfers
+      .sort((a, b) => {
+        const getPriority = (status?: string) => {
+          if (status === 'uploading' || status === 'downloading') return 0;
+          if (status === 'pending') return 1;
+          if (status === 'completed') return 2;
+          return 3; // errors etc
+        };
 
-      const prioA = getPriority(a.status);
-      const prioB = getPriority(b.status);
+        const prioA = getPriority(a.status);
+        const prioB = getPriority(b.status);
 
-      if (prioA !== prioB) return prioA - prioB;
-
-      // Secondary sort: alphabetical or timestamp if available? 
-      // Current behavior was reverse chronologicalish (reverse of map insertion).
-      return b.name.localeCompare(a.name); // Fallback to name for stability
-    });
+        if (prioA !== prioB) return prioA - prioB;
+        return b.name.localeCompare(a.name);
+      });
   }, [files]);
 
   return (
