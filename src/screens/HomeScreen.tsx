@@ -4,11 +4,13 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
 import LinearGradient from 'react-native-linear-gradient';
 import { useTheme } from '../theme/ThemeContext';
-import { useConnectionStore } from '../store';
+import { useConnectionStore, useTransferStore } from '../store';
+import CircularProgress from '../components/CircularProgress';
 import { requestConnectPermissions } from '../utils/permissionHelper';
 import { BannerAd, BannerAdSize, TestIds } from 'react-native-google-mobile-ads';
 import { DisplayAds, ProdIDs } from '../utils/Constant';
 import HapticUtil from '../utils/HapticUtil';
+import WifiManager from 'react-native-wifi-reborn';
 
 const adUnitId = __DEV__ ? TestIds.ADAPTIVE_BANNER : ProdIDs.ADAPTIVE_BANNER;
 
@@ -17,13 +19,33 @@ const { width } = Dimensions.get('window');
 const HomeScreen = ({ navigation }: any) => {
   const { colors, isDark, toggleTheme, typography, layout } = useTheme();
   const { isConnected, ssid, resetConnection } = useConnectionStore();
+  const { isTransferring, transferStats, currentFiles } = useTransferStore();
+  
+  const fileCount = Object.keys(currentFiles).length;
+  const overallProgress = (transferStats?.overallProgress || 0) * 100;
 
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(30)).current;
   const boltScale = useRef(new Animated.Value(1)).current;
   const boltRotate = useRef(new Animated.Value(0)).current;
 
+  const [wifiEnabled, setWifiEnabled] = React.useState(true);
+
   useEffect(() => {
+    const checkWifi = async () => {
+      try {
+        if (Platform.OS === 'android') {
+          const enabled = await WifiManager.isEnabled();
+          setWifiEnabled(enabled);
+        }
+      } catch (e) {
+        console.log('WiFi check error:', e);
+      }
+    };
+
+    checkWifi();
+    const unsubscribe = navigation.addListener('focus', checkWifi);
+    
     requestConnectPermissions().catch(err => console.error(err));
     Animated.parallel([
       Animated.timing(fadeAnim, { toValue: 1, duration: 600, useNativeDriver: true }),
@@ -131,9 +153,26 @@ const HomeScreen = ({ navigation }: any) => {
                 <Text style={[styles.headerSubtitle, { fontFamily: typography.fontFamily }]}>Fastest File Transfer</Text>
               </View>
             </View>
-            <TouchableOpacity onPress={() => { HapticUtil.light(); toggleTheme(); }} style={styles.iconButton}>
-              <Icon name={isDark ? "weather-sunny" : "weather-night"} size={20} color="#FFF" />
-            </TouchableOpacity>
+
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+              {isTransferring && (
+                <TouchableOpacity 
+                   onPress={() => navigation.navigate('FileTransfer')}
+                   style={styles.progressHeaderBtn}
+                >
+                  <CircularProgress 
+                    size={38} 
+                    strokeWidth={3} 
+                    progress={overallProgress} 
+                    count={fileCount} 
+                    color="#FFF" 
+                  />
+                </TouchableOpacity>
+              )}
+              <TouchableOpacity onPress={() => { HapticUtil.light(); toggleTheme(); }} style={styles.iconButton}>
+                <Icon name={isDark ? "weather-sunny" : "weather-night"} size={20} color="#FFF" />
+              </TouchableOpacity>
+            </View>
           </View>
         </SafeAreaView>
       </View>
@@ -173,31 +212,44 @@ const HomeScreen = ({ navigation }: any) => {
             style={[
               styles.statusBanner,
               {
-                backgroundColor: isDark ? 'rgba(255, 152, 0, 0.08)' : '#FFF8E1',
-                borderColor: isDark ? 'rgba(255, 152, 0, 0.25)' : '#FFECB3',
+                backgroundColor: isDark ? 'rgba(52, 152, 219, 0.08)' : '#E3F2FD',
+                borderColor: isDark ? 'rgba(52, 152, 219, 0.25)' : '#BBDEFB',
                 borderWidth: 1,
                 opacity: fadeAnim,
               }
             ]}
           >
             <View style={styles.statusContent}>
-              <View style={[styles.statusIconContainer, { backgroundColor: isDark ? 'rgba(255,152,0,0.2)' : '#FFE082' }]}>
-                <Icon name="wifi-off" size={20} color={isDark ? '#FFB74D' : '#E65100'} />
+              <View style={[styles.statusIconContainer, { backgroundColor: isDark ? 'rgba(52,152,219,0.2)' : '#90CAF9' }]}>
+                <Icon name="link-variant-off" size={20} color={isDark ? '#64B5F6' : '#1565C0'} />
               </View>
               <View style={{ marginLeft: 12, flex: 1 }}>
-                <Text style={[styles.statusTitle, { color: isDark ? '#FFCC80' : '#BF360C', fontFamily: typography.fontFamily }]}>
-                  Not Connected
+                <Text style={[styles.statusTitle, { color: isDark ? '#90CAF9' : '#0D47A1', fontFamily: typography.fontFamily }]}>
+                  Device not paired
                 </Text>
-                <Text style={[styles.statusSub, { color: isDark ? '#FFA726' : '#E64A19', fontFamily: typography.fontFamily }]}>
-                  Use QR to pair with a device
+                <Text style={[styles.statusSub, { color: isDark ? '#64B5F6' : '#1976D2', fontFamily: typography.fontFamily }]}>
+                  {wifiEnabled ? 'WiFi is enabled' : 'Use QR code for instant pairing'}
                 </Text>
               </View>
               <TouchableOpacity
-                onPress={() => Linking.openSettings()}
+                onPress={() => {
+                  HapticUtil.light();
+                  if (!wifiEnabled) {
+                    if (Platform.OS === 'android') {
+                      Linking.sendIntent('android.settings.WIFI_SETTINGS');
+                    } else {
+                      Linking.openURL('App-Prefs:root=WIFI');
+                    }
+                  } else {
+                    navigation.navigate('Receive', { mode: 'connect' });
+                  }
+                }}
                 activeOpacity={0.7}
-                style={[styles.disconnectBtn, { backgroundColor: isDark ? 'rgba(255,152,0,0.15)' : '#FFE0B2' }]}
+                style={[styles.disconnectBtn, { backgroundColor: isDark ? 'rgba(52,152,219,0.15)' : '#BBDEFB' }]}
               >
-                <Text style={[styles.disconnectText, { color: isDark ? '#FFB74D' : '#E65100', fontFamily: typography.fontFamily }]}>WiFi</Text>
+                <Text style={[styles.disconnectText, { color: isDark ? '#90CAF9' : '#0D47A1', fontFamily: typography.fontFamily }]}>
+                  {wifiEnabled ? 'Connect' : 'WiFi'}
+                </Text>
               </TouchableOpacity>
             </View>
           </Animated.View>
@@ -222,33 +274,54 @@ const HomeScreen = ({ navigation }: any) => {
             />
           </View>
 
-          <View style={styles.sectionLabel}>
-            <Text style={[styles.label, { color: colors.subtext, fontFamily: typography.fontFamily }]}>QUICK CONNECT</Text>
-            <View style={[styles.line, { backgroundColor: colors.border }]} />
-          </View>
-
-          <View style={[styles.quickActionCard, { backgroundColor: isDark ? colors.surface : colors.surface, borderColor: isDark ? colors.border : '#F0F0F0', ...layout.shadow.medium }]}>
-            <TouchableOpacity style={styles.quickActionItem} onPress={() => { HapticUtil.light(); navigation.navigate('Sharing', { items: [], mode: 'pairing' }); }}>
-              <View style={[styles.quickActionIcon, { backgroundColor: isDark ? '#4A148C' : '#F3E5F5' }]}>
-                <Icon name="qrcode" size={28} color={isDark ? '#CE93D8' : '#9C27B0'} />
+          {!isConnected && (
+            <>
+              <View style={styles.sectionLabel}>
+                <Text style={[styles.label, { color: colors.subtext, fontFamily: typography.fontFamily }]}>QUICK CONNECT</Text>
+                <View style={[styles.line, { backgroundColor: colors.border }]} />
               </View>
-              <Text style={[styles.quickActionText, { color: colors.text }]}>Show QR</Text>
-            </TouchableOpacity>
 
-            <TouchableOpacity style={styles.quickActionItem} onPress={() => { HapticUtil.light(); navigation.navigate('Receive', { mode: 'connect' }); }}>
-              <View style={[styles.quickActionIcon, { backgroundColor: isDark ? '#004D40' : '#E0F2F1' }]}>
-                <Icon name="qrcode-scan" size={28} color={isDark ? '#80CBC4' : '#009688'} />
-              </View>
-              <Text style={[styles.quickActionText, { color: colors.text }]}>Scan QR</Text>
-            </TouchableOpacity>
+              <View style={styles.pairingContainer}>
+                <TouchableOpacity 
+                  style={[styles.pairingCard, { backgroundColor: isDark ? '#4A148C' : '#9C27B0' }]} 
+                  onPress={() => { HapticUtil.light(); navigation.navigate('Sharing', { items: [], mode: 'pairing' }); }}
+                >
+                  <LinearGradient colors={['rgba(255,255,255,0.2)', 'transparent']} style={styles.cardGradient} />
+                  <View style={styles.pairingIconBox}>
+                    <Icon name="qrcode" size={32} color="#FFF" />
+                  </View>
+                  <Text style={styles.pairingTitle}>Show QR</Text>
+                  <Text style={styles.pairingSub}>Receive pairing</Text>
+                </TouchableOpacity>
 
-            <TouchableOpacity style={styles.quickActionItem} onPress={() => { HapticUtil.light(); navigation.navigate('PCConnection'); }}>
-              <View style={[styles.quickActionIcon, { backgroundColor: isDark ? '#0D47A1' : '#E3F2FD' }]}>
-                <Icon name="monitor-share" size={28} color={isDark ? '#90CAF9' : '#1976D2'} />
+                <TouchableOpacity 
+                  style={[styles.pairingCard, { backgroundColor: isDark ? '#004D40' : '#009688' }]} 
+                  onPress={() => { HapticUtil.light(); navigation.navigate('Receive', { mode: 'connect' }); }}
+                >
+                  <LinearGradient colors={['rgba(255,255,255,0.2)', 'transparent']} style={styles.cardGradient} />
+                  <View style={styles.pairingIconBox}>
+                    <Icon name="qrcode-scan" size={32} color="#FFF" />
+                  </View>
+                  <Text style={styles.pairingTitle}>Scan QR</Text>
+                  <Text style={styles.pairingSub}>Join device</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity 
+                  style={[styles.pairingCard, { backgroundColor: isDark ? '#0D47A1' : '#1976D2', width: '100%', flex: 0 }]} 
+                  onPress={() => { HapticUtil.light(); navigation.navigate('PCConnection'); }}
+                >
+                  <LinearGradient colors={['rgba(255,255,255,0.2)', 'transparent']} style={styles.cardGradient} />
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+                    <Icon name="monitor-share" size={24} color="#FFF" />
+                    <View>
+                      <Text style={[styles.pairingTitle, { fontSize: 16 }]}>PC Share</Text>
+                      <Text style={styles.pairingSub}>Transfer to browser</Text>
+                    </View>
+                  </View>
+                </TouchableOpacity>
               </View>
-              <Text style={[styles.quickActionText, { color: colors.text }]}>PC Share</Text>
-            </TouchableOpacity>
-          </View>
+            </>
+          )}
 
           <View style={{ alignItems: 'center', marginTop: 24 }}>
             {DisplayAds && (
@@ -332,6 +405,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     borderRadius: 20,
     backgroundColor: 'rgba(255,255,255,0.15)',
+  },
+  progressHeaderBtn: {
+    padding: 2,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255,255,255,0.1)',
   },
   boltContainer: {
     width: 44,
@@ -438,28 +516,42 @@ const styles = StyleSheet.create({
     height: 80,
     borderRadius: 40
   },
-  quickActionCard: {
+  pairingContainer: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingVertical: 20,
-    paddingHorizontal: 24,
+    flexWrap: 'wrap',
+    gap: 12,
+  },
+  pairingCard: {
+    flex: 1,
+    minWidth: '45%',
+    height: 120,
     borderRadius: 24,
-    borderWidth: 1,
-  },
-  quickActionItem: {
+    padding: 16,
+    justifyContent: 'center',
     alignItems: 'center',
-    gap: 8,
+    position: 'relative',
+    overflow: 'hidden',
   },
-  quickActionIcon: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
+  cardGradient: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  pairingIconBox: {
+    width: 48,
+    height: 48,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255,255,255,0.2)',
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 4,
+    marginBottom: 8,
   },
-  quickActionText: {
-    fontSize: 13,
+  pairingTitle: {
+    color: '#FFF',
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  pairingSub: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 11,
     fontWeight: '600',
   },
   sectionLabel: {

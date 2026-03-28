@@ -1,345 +1,230 @@
-import { Platform } from 'react-native';
+// TransferClient.ts
 import ReactNativeBlobUtil from 'react-native-blob-util';
-
+import crypto from 'react-native-quick-crypto';
 import { Buffer } from 'buffer';
-import DeviceInfo from 'react-native-device-info';
-import CryptoJS from 'crypto-js';
 import { saveHistoryItem } from './HistoryService';
-import DiscoveryManager from './DiscoveryManager';
 
+export type TransferContext = 'pc' | 'p2p';
 export type TransferStatus = {
-  type: 'log' | 'progress' | 'complete' | 'connection';
+  type: 'log' | 'progress' | 'complete' | 'connection' | 'error';
+  context?: TransferContext;
   message?: string;
-  fileProgress?: {
-    name: string;
-    percent: number;
-    received: number;
-    total: number;
-    speed?: number;    // bytes/sec — wall-clock
-    etaSecs?: number;
-  };
+  fileProgress?: { name: string; percent: number; received: number; total: number; speed?: number; etaSecs?: number; };
   connected: boolean;
   files?: any[];
 };
 
-// ─── Wall-clock speed tracker — same formula as TransferServer ────────────────
-// Both sides use identical math → same speed/ETA shown on both devices.
 class SpeedTracker {
   private t0 = 0;
   private b0 = 0;
-  private on = false;
 
-  begin(bytes: number) { this.t0 = Date.now(); this.b0 = bytes; this.on = true; }
-
-  sample(bytes: number, total: number): { speed: number; etaSecs: number } {
-    if (!this.on) return { speed: 0, etaSecs: 0 };
-    const dt = (Date.now() - this.t0) / 1000;
-    if (dt < 0.3) return { speed: 0, etaSecs: 0 };
-    const speed = Math.round((bytes - this.b0) / dt);
-    const remaining = total - bytes;
-    const etaSecs = speed > 0 && remaining > 0 ? Math.round(remaining / speed) : 0;
-    return { speed, etaSecs };
+  begin(bytes: number) {
+    this.t0 = Date.now();
+    this.b0 = bytes;
   }
 
-  reset() { this.on = false; }
+  sample(bytes: number, total: number) {
+    const dt = (Date.now() - this.t0) / 1000;
+    if (dt < 0.1) return { speed: 0, etaSecs: 0 };
+
+    const speed = Math.round((bytes - this.b0) / dt);
+    const remaining = total - bytes;
+    const etaSecs = speed > 0 ? Math.round(remaining / speed) : 0;
+
+    return { speed, etaSecs };
+  }
 }
 
 export class TransferClient {
-  private isTransferring = false;
-  private shouldStop = false;
-  private isProbing = false;
-  private downloadedFiles = new Set<string>();
-  private activeJobs = new Map<string, any>();
-  private currentFiles: any[] = [];
   public onStatus?: (status: TransferStatus) => void;
-
-  public connectedIp: string | null = null;
-  public connectedPort: number = 8888;
-
-  private static readonly MAX_RETRIES = 5;
-  private static readonly RETRY_BASE_DELAY_MS = 1500;
-
+  public isTransferring = false;
+  private shouldStop = false;
+  private activeJobs = new Map<string, any>();
+  private statusListeners: Set<(status: TransferStatus) => void> = new Set();
+  private downloadedFiles = new Set<string>();
   private secretKey?: string;
-  private speedTrackers = new Map<string, SpeedTracker>();
+  private currentLoopId = 0; // ✅ Prevent overlapping poll loops from multiple start() calls
 
-  start(port = 8888, saveDir: string, specificIp?: string, secretKey?: string) {
-    this.shouldStop = false;
-    this.isTransferring = false;
-    this.isProbing = false;
-    this.activeJobs.clear();
-    this.speedTrackers.clear();
-    this.currentFiles = [];
-    this.secretKey = secretKey;
-    this.initConnection(port, saveDir, specificIp);
+  public addStatusListener(l: (s: TransferStatus) => void) { this.statusListeners.add(l); }
+  public removeStatusListener(l: (s: TransferStatus) => void) { this.statusListeners.delete(l); }
+
+  private emit(status: TransferStatus) {
+    const finalStatus = { ...status, context: this.currentContext || 'p2p' };
+    this.onStatus?.(finalStatus);
+    this.statusListeners.forEach(l => l(finalStatus));
   }
+  private currentContext: TransferContext | null = null;
 
-  stop() {
+  public stop() {
     this.shouldStop = true;
     this.isTransferring = false;
-    this.isProbing = false;
-    this.activeJobs.forEach(job => { try { job.cancel(); } catch (_) { } });
+    this.activeJobs.forEach(job => job.cancel());
     this.activeJobs.clear();
-    this.speedTrackers.clear();
-    this.currentFiles = [];
     this.downloadedFiles.clear();
-    this.connectedIp = null;
+    this.emit({ type: 'connection', connected: false });
   }
 
-  clearFailedFile(fileName: string, fileSize: number) {
-    this.downloadedFiles.delete(fileName + fileSize);
-    this.speedTrackers.delete(fileName);
+  public clearFailedFile(fileName: string, fileSize: number) {
+    this.downloadedFiles.delete(`${fileName}|${fileSize}`);
   }
 
-  async registerWithPeer(myPort: number): Promise<void> {
-    if (!this.connectedIp || this.shouldStop) return;
-    try {
-      const url = `http://${this.connectedIp}:${this.connectedPort}/api/register?port=${myPort}`;
-      const ctrl = new AbortController();
-      const tid = setTimeout(() => ctrl.abort(), 6000);
-      await fetch(url, { method: 'GET', signal: ctrl.signal });
-      clearTimeout(tid);
-    } catch (_) { }
-  }
+  // ✅ Call: TransferClient.start(8888, saveDir, ip) support
+  public async start(port = 8888, saveDir: string, ip: string, secretKey?: string, context: TransferContext = 'p2p') {
+    this.currentContext = context;
+    // 🛑 Session handling: increment ID so any previous loop knows to die
+    const loopId = ++this.currentLoopId;
+    this.shouldStop = false;
+    this.secretKey = secretKey;
+    this.downloadedFiles.clear();
+    this.isTransferring = false;
+    this.emit({ type: 'connection', connected: true, message: 'Syncing...' });
 
-  private emit(status: TransferStatus) { this.onStatus?.(status); }
-
-  private async initConnection(port: number, saveDir: string, specificIp?: string) {
-    if (this.isProbing || this.shouldStop) return;
-    this.isProbing = true;
-
-    // We let the OS determine the route rather than using forceWifiUsage, 
-    // because forceWifiUsage forces the wlan0 interface which blocks P2P traffic (p2p0 interface).
-
-    let foundIp: string | null = null;
-
-    // CASE 1: Specific IP provided (Wi-Fi Direct / QR Scan)
-    if (specificIp && specificIp !== '0.0.0.0' && specificIp !== '127.0.0.1') {
-      this.emit({ type: 'log', message: `🎯 Connecting to ${specificIp}...`, connected: false });
-
-      // Wi-Fi Direct is point-to-point. If we have an IP, it's THE IP.
-      // We retry for 60 seconds because the server might still be booting or group owner transitioning.
-      console.log(`[TransferClient] Starting HTTP fetch probe sequence targeting ${specificIp}:${port} for up to 45 seconds`);
-      for (let i = 0; i < 30 && !this.shouldStop; i++) {
-        try {
-          const tcpOk = await DiscoveryManager.probeTcpPort(specificIp, port, 1500);
-          console.log(`[TransferClient] Probe attempt ${i + 1} - TCP socket ping: ${tcpOk ? 'Success' : 'Failed'}`);
-          
-          // Even if TCP failed, try HTTP directly (Android routing weirdness sometimes allows one but not the other)
-          const files = await this.fetchMetadata(specificIp, port);
-          if (files) {
-            console.log(`[TransferClient] Successfully reached Sender over HTTP at ${specificIp}:${port}`);
-            foundIp = specificIp;
-            this.currentFiles = files; // Pre-cache to save a network roundtrip later
-            break;
-          }
-        } catch (e: any) {
-          console.log(`[TransferClient] HTTP Probe attempt ${i + 1} failed: ${e.message}`);
-        }
-        
-        this.emit({ type: 'log', message: `⏳ Waiting for sender... (${i + 1}/30)`, connected: false });
-        await new Promise(r => setTimeout(r, 1500));
-      }
-
-      if (!foundIp && !this.shouldStop) {
-        console.error(`[TransferClient] Exhausted all HTTP probes, server unreachable at ${specificIp}:${port}`);
-        this.emit({ type: 'log', message: '❌ Could not reach sender. Turn off Mobile Data & try again.', connected: false });
-        this.isProbing = false;
-        return;
-      }
-    }
-
-    // CASE 2: No IP provided, use mDNS/Scan discovery
-    if (!foundIp && !this.shouldStop) {
-      this.emit({ type: 'log', message: '🔍 Discovering nearby senders...', connected: false });
-      foundIp = await DiscoveryManager.discoverSender(port, msg => this.emit({ type: 'log', message: msg, connected: false }));
-    }
-
-    this.isProbing = false;
-
-    if (foundIp && !this.shouldStop) {
-      this.persistentLoop(foundIp, port, saveDir);
-    } else if (!this.shouldStop) {
-      this.emit({ type: 'log', message: '❌ Discovery failed. Try scanning the QR code.', connected: false });
-    }
-  }
-
-  private async persistentLoop(ip: string, port: number, saveDir: string) {
-    console.log(`[TransferClient] Starting persistent data loop pointing to ${ip}:${port}`);
-    this.connectedIp = ip;
-    this.connectedPort = port;
-    this.emit({ type: 'connection', message: '✅ Connected!', connected: true });
-
-    let failCount = 0;
-    while (!this.shouldStop) {
+    // Loop logic to monitor the server for new files
+    while (!this.shouldStop && this.currentLoopId === loopId) {
       try {
-        const files = await this.fetchMetadata(ip, port);
-        if (failCount > 0) console.log(`[TransferClient] Metadata fetch completely restored after ${failCount} failures`);
-        if (files) console.log(`[TransferClient] Metadata fetched successfully! Sender has ${files.length} files queued.`);
-        failCount = 0;
-        this.currentFiles = files;
+        const res = await fetch(`http://${ip}:${port}/api/files`);
+        if (!res.ok) throw new Error("Sync Fail");
+        
+        const files = await res.json();
+        
+        // 📥 Sync files to UI
+        if (Array.isArray(files)) {
+          this.emit({ type: 'connection', connected: true, files });
+        }
 
-        if (files?.length > 0) {
-          this.emit({ type: 'log', message: this.isTransferring ? '⬇️ Downloading...' : '⏳ Standing by...', connected: true, files: this.currentFiles });
-
-          if (!this.isTransferring) {
-            // Only queue files not yet fully downloaded
-            const newFiles = files.filter((f: any) => !this.downloadedFiles.has(f.name + (f.size || 0)));
-            if (newFiles.length > 0) {
-              this.isTransferring = true;
-              this.downloadAll(newFiles, ip, port, saveDir, files)
-                .catch(e => console.error('[Client] downloadAll failed:', e))
-                .finally(() => { this.isTransferring = false; });
-            }
+        if (files.length > 0 && !this.isTransferring) {
+          this.isTransferring = true;
+          try {
+            await this.processBatch(files, ip, port, saveDir);
+          } catch (e) {
+            console.error('[TransferClient] Batch error:', e);
+          } finally {
+            this.isTransferring = false;
           }
         }
-      } catch (_) {
-        failCount++;
-        if (failCount > 10 && !this.shouldStop) {
-          this.emit({ type: 'log', message: '🔄 Connection lost. Re-discovering...', connected: false });
-          this.initConnection(port, saveDir, ip);
-          return;
-        }
+      } catch (e: any) { 
+        // Sync poll failed, will retry
       }
       await new Promise(r => setTimeout(r, 2000));
     }
   }
 
-  private async fetchMetadata(ip: string, port: number): Promise<any[]> {
-    const ctrl = new AbortController();
-    const tid = setTimeout(() => ctrl.abort(), 10000);
-    try {
-      const res = await fetch(`http://${ip}:${port}/api/files`, { signal: ctrl.signal });
-      clearTimeout(tid);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return await res.json();
-    } catch (e) { clearTimeout(tid); throw e; }
-  }
-
-  async downloadAll(files: any[], ip: string, port: number, saveDir: string, allKnownFiles?: any[]) {
-    if (!(await ReactNativeBlobUtil.fs.exists(saveDir))) await ReactNativeBlobUtil.fs.mkdir(saveDir).catch(() => { });
-    this.currentFiles = allKnownFiles || files;
-    this.emit({ type: 'log', message: '⬇️ Starting batch download...', connected: true, files: this.currentFiles });
-
+  private async processBatch(files: any[], ip: string, port: number, saveDir: string) {
     for (const file of files) {
       if (this.shouldStop) break;
-      this.emit({ type: 'log', message: `⬇️ Downloading: ${file.name}`, connected: true, files: this.currentFiles });
+      const key = `${file.name}|${file.size}`;
+      if (this.downloadedFiles.has(key)) continue;
+
       try {
-        await this.downloadWithRetry(file, ip, port, saveDir, 0);
-        // Mark ONLY after confirmed complete — prevents re-queue race
-        this.downloadedFiles.add(file.name + (file.size || 0));
-        console.log(`[Client] ✅ Confirmed complete: ${file.name}`);
-      } catch (e) {
-        // Do NOT add to downloadedFiles — will retry on next poll
-        console.error(`[Client] ❌ Download failed (will retry next poll): ${file.name}`, e);
+        await this.downloadFile(file, ip, port, saveDir);
+        this.downloadedFiles.add(key);
+      } catch (e: any) {
+        console.error('[TransferClient] File download error:', file.name, e);
       }
     }
-
-    this.emit({ type: 'complete', message: '✅ Batch Completed', connected: true, files: this.currentFiles });
+    // Only emit batch completion if we completed something
+    this.emit({ type: 'complete', connected: true, message: 'Batch Sync Done' });
   }
 
-  private async downloadWithRetry(file: any, ip: string, port: number, saveDir: string, attempt: number): Promise<void> {
+  private async downloadFile(file: any, ip: string, port: number, saveDir: string) {
     const dest = `${saveDir}/${file.name}`;
-    const total: number = file.size || 0;
+    let resumeAt = 0;
 
-    // Skip if already complete
     if (await ReactNativeBlobUtil.fs.exists(dest)) {
-      const stat = await ReactNativeBlobUtil.fs.stat(dest);
-      if (stat.size >= total && total > 0) {
-        this.emit({ type: 'progress', connected: true, files: this.currentFiles, fileProgress: { name: file.name, percent: 100, received: total, total, speed: 0, etaSecs: 0 } });
-        return;
-      }
-    }
-
-    // Resume support
-    let resumeFrom = 0;
-    if (await ReactNativeBlobUtil.fs.exists(dest)) {
-      const stat = await ReactNativeBlobUtil.fs.stat(dest);
-      if (stat.size > 0) {
-        resumeFrom = stat.size;
-        const pct = Math.min(99, Math.floor((resumeFrom / total) * 100));
-        this.emit({ type: 'progress', connected: true, files: this.currentFiles, fileProgress: { name: file.name, percent: pct, received: resumeFrom, total, speed: 0, etaSecs: 0 } });
-      }
-    } else {
-      this.emit({ type: 'progress', connected: true, files: this.currentFiles, fileProgress: { name: file.name, percent: 0, received: 0, total, speed: 0, etaSecs: 0 } });
-    }
-
-    // Init speed tracker for this file
-    if (!this.speedTrackers.has(file.name)) {
-      const t = new SpeedTracker();
-      t.begin(resumeFrom);
-      this.speedTrackers.set(file.name, t);
-    }
-
-    const tracker = this.speedTrackers.get(file.name)!;
-    const headers: Record<string, string> = {};
-    if (resumeFrom > 0 && !this.secretKey) headers['Range'] = `bytes=${resumeFrom}-`;
-
-    const downloadUrl = `http://${ip}:${port}/api/download?name=${encodeURIComponent(file.name)}`;
-
-    try {
-      const task = ReactNativeBlobUtil.config({
-        path: dest,
-        overwrite: resumeFrom === 0,
-        // High-performance flags for mobile-to-mobile
-        fileCache: false,
-      }).fetch('GET', downloadUrl, headers);
-
-      this.activeJobs.set(file.name, task);
-
-      task.progress({ interval: 500 }, (received, totalCount) => {
-        const currentTotal = Number(totalCount);
-        const receivedSoFar = resumeFrom + Number(received);
-        const expectedTotal = total > 0 ? total : (currentTotal > 0 ? currentTotal + resumeFrom : receivedSoFar);
-        if (expectedTotal === 0) return;
-        const pct = Math.min(99, Math.floor((receivedSoFar / expectedTotal) * 100));
-        const { speed, etaSecs } = tracker.sample(receivedSoFar, expectedTotal);
+      const s = await ReactNativeBlobUtil.fs.stat(dest);
+      // Only skip if the size is EXACTLY the same AND it's not a tiny file (which might be a placeholder)
+      if (s.size === file.size && s.size > 0) {
         this.emit({
-          type: 'progress', connected: true, files: this.currentFiles,
-          fileProgress: { name: file.name, percent: pct, received: receivedSoFar, total: expectedTotal, speed, etaSecs },
+          type: 'complete',
+          connected: true,
+          fileProgress: { name: file.name, percent: 100, received: file.size, total: file.size }
         });
-      });
-
-      const result = await task.finally(() => this.activeJobs.delete(file.name));
-      const respInfo = result.info();
-
-      if (respInfo.status === 200 || respInfo.status === 206) {
-        // Decrypt if needed
-        if (this.secretKey) {
-          const encB64 = await ReactNativeBlobUtil.fs.readFile(dest, 'base64');
-          const key = CryptoJS.SHA256(this.secretKey);
-          const iv = CryptoJS.enc.Hex.parse(key.toString().substring(0, 32));
-          const dec = CryptoJS.AES.decrypt(encB64, key, { iv });
-          const decB64 = dec.toString(CryptoJS.enc.Utf8);
-          if (!decB64) throw new Error('Decryption failed');
-          await ReactNativeBlobUtil.fs.writeFile(dest, decB64, 'base64');
-        }
-
-        // Integrity check — if size mismatch, delete partial and let retry handle it
-        if (total > 0 && !this.secretKey) {
-          const finalStat = await ReactNativeBlobUtil.fs.stat(dest).catch(() => null);
-          if (!finalStat || finalStat.size < total) {
-            console.warn(`[Client] ⚠️ Size mismatch ${file.name}: got ${finalStat?.size} expected ${total}. Deleting partial.`);
-            await ReactNativeBlobUtil.fs.unlink(dest).catch(() => { });
-            throw new Error(`Size mismatch — got ${finalStat?.size}, expected ${total}`);
-          }
-        }
-
-        this.speedTrackers.delete(file.name);
-        this.emit({ type: 'progress', connected: true, files: this.currentFiles, fileProgress: { name: file.name, percent: 100, received: total, total, speed: 0, etaSecs: 0 } });
-        saveHistoryItem({ fileName: file.name, fileSize: file.size, type: file.type || 'unknown', role: 'received', status: 'success' });
         return;
       }
-
-      await ReactNativeBlobUtil.fs.unlink(dest).catch(() => { });
-      throw new Error(`HTTP ${respInfo.status}`);
-
-    } catch (e: any) {
-      if (attempt >= TransferClient.MAX_RETRIES || this.shouldStop) throw e;
-      const delay = TransferClient.RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
-      this.emit({ type: 'log', message: `⚠️ ${file.name} — retrying... (${attempt + 1}/${TransferClient.MAX_RETRIES})`, connected: true, files: this.currentFiles });
-      await new Promise(r => setTimeout(r, delay));
-      return this.downloadWithRetry(file, ip, port, saveDir, attempt + 1);
+      // If file exists but size is different, we can resume only if NOT using encryption
+      // (Encrypted files must be re-downloaded fully for security/correctness)
+      resumeAt = (s.size < file.size && !this.secretKey) ? s.size : 0;
     }
+
+    const url = `http://${ip}:${port}/api/download?name=${encodeURIComponent(file.name)}&token=${file.token}`;
+    const reqHeaders: Record<string, string> = {};
+    if (resumeAt > 0) reqHeaders['Range'] = `bytes=${resumeAt}-`;
+    const task = ReactNativeBlobUtil.config({ path: dest, overwrite: resumeAt === 0 }).fetch('GET', url, reqHeaders);
+
+    const tracker = new SpeedTracker();
+    tracker.begin(resumeAt);
+
+    this.activeJobs.set(file.name, task);
+    task.progress((received, total) => {
+      const currentReceived = Number(received) + resumeAt;
+      const { speed, etaSecs } = tracker.sample(currentReceived, file.size);
+      
+      this.emit({
+        type: 'progress', connected: true, fileProgress: {
+          name: file.name, percent: Math.floor((currentReceived / file.size) * 100),
+          received: currentReceived, total: file.size,
+          speed, etaSecs
+        }
+      });
+    });
+
+    const res = await task;
+    const h = res.info().headers;
+    const ivHex = h['X-IV'] || h['x-iv'];
+    const sHash = h['X-Hash'] || h['x-hash'];
+
+    if (this.secretKey && ivHex) await this.decryptStream(dest, ivHex);
+
+    if (sHash) {
+      const lHash = await ReactNativeBlobUtil.fs.hash(dest, 'sha256');
+      if (lHash.toLowerCase() !== sHash.toLowerCase()) {
+        await ReactNativeBlobUtil.fs.unlink(dest);
+        throw new Error("Hash fail");
+      }
+    }
+
+    // ✅ Emit explicit completion for this file
+    this.emit({
+      type: 'complete',
+      connected: true,
+      fileProgress: {
+        name: file.name,
+        percent: 100,
+        received: file.size,
+        total: file.size,
+        speed: 0,
+        etaSecs: 0
+      }
+    });
+
+    this.activeJobs.delete(file.name); // 🗑️ Cleanup job reference
+    saveHistoryItem({ fileName: file.name, fileSize: file.size, type: file.type, role: 'received', status: 'success' });
+  }
+
+  // ✅ STREAMING DECRYPT (No Memory Leaks)
+  private async decryptStream(path: string, ivHex: string) {
+    const key = crypto.createHash('sha256').update(this.secretKey!).digest();
+    const iv = Buffer.from(ivHex, 'hex');
+    const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
+    const tmp = path + ".enc";
+    await ReactNativeBlobUtil.fs.mv(path, tmp);
+
+    const r = await ReactNativeBlobUtil.fs.readStream(tmp, 'base64', 512 * 1024, 0);
+    const w = await ReactNativeBlobUtil.fs.writeStream(path, 'base64', false);
+
+    return new Promise((resolve, reject) => {
+      r.onData(c => {
+        const d = decipher.update(Buffer.from(c as string, 'base64'));
+        if (d.length) w.write(d.toString('base64'));
+      });
+      r.onEnd(async () => {
+        const f = decipher.final();
+        if (f.length) await w.write(f.toString('base64'));
+        await w.close(); await ReactNativeBlobUtil.fs.unlink(tmp);
+        resolve(true);
+      });
+      r.onError(reject); r.open();
+    });
   }
 }
 

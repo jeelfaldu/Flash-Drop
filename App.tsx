@@ -18,6 +18,7 @@ import { ToastProvider } from './src/components/Toast';
 import { GlobalTransferOverlay } from './src/components/GlobalTransferOverlay';
 import mobileAds, { InterstitialAd, AdEventType, TestIds } from 'react-native-google-mobile-ads';
 import { ProdIDs, DisplayAds } from './src/utils/Constant';
+import TransferManager from './src/utils/TransferManager';
 
 const interstitialAdUnitId = __DEV__ ? TestIds.INTERSTITIAL : ProdIDs.INTERSTITIAL;
 const interstitial = InterstitialAd.createForAdRequest(interstitialAdUnitId, {
@@ -140,6 +141,9 @@ const App = () => {
       // ── CLEANUP: Force reset stores to wipe out ghost data from older versions ──
       useTransferStore.getState().resetTransfer();
       useConnectionStore.getState().resetConnection();
+
+      // Start global listener for transfer progress
+      TransferManager.initialize();
 
       // Show ad only for returning users
       if (!isReturningUser || !DisplayAds) return;

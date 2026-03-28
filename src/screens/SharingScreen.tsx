@@ -71,8 +71,11 @@ const SharingScreen = ({ route, navigation }: any) => {
 
     return () => {
       backHandler.remove();
-      // If we are leaving without redirection, stop the service
-      if (!isRedirected.current) {
+      // Only stop the service if we haven't connected yet OR if the user is canceling.
+      // If isRedirected is true, we are moving to FileTransfer, so keep it.
+      // If we are leaving but status is 'ready' (QR shown), we MIGHT want to keep it
+      // so the other device can still find us.
+      if (!isRedirected.current && status !== 'ready' && status !== 'connected') {
         WiFiDirectTransferService.stop();
       }
     };
@@ -172,6 +175,7 @@ const SharingScreen = ({ route, navigation }: any) => {
 
           console.log(`[SharingScreen] Initializing startSender() for Wi-Fi Direct`);
           await WiFiDirectTransferService.startSender(items, secretKey);
+
           console.log(`[SharingScreen] startSender() Promise resolved`);
         } else {
           // iOS / Local Network Fallback
@@ -183,7 +187,7 @@ const SharingScreen = ({ route, navigation }: any) => {
             setConnectionDetails({ type: 'hotspot', ssid: 'Local Network', ip: ip });
             setQrData(JSON.stringify({ ssid: null, pass: null, ip: ip, key: secretKey }));
 
-            TransferServer.start(8888, items, (serverStatus) => {
+            TransferServer.start(8888, items, (serverStatus: any) => {
               if (serverStatus.type === 'client_connected') {
                 handleClientJoined(serverStatus.clientAddress || 'Receiver', secretKey);
               }
@@ -204,18 +208,30 @@ const SharingScreen = ({ route, navigation }: any) => {
 
     const handleClientJoined = (deviceName: string, secretKey: string) => {
       console.log(`[SharingScreen] handleClientJoined triggered for device: ${deviceName}`);
+      
+      // Update store so Home screen knows we are paired even if we haven't moved to Transfer screen
+      setConnected(true);
+      setConnectionDetails({ type: 'wifi-direct', ssid: 'Direct-FlashDrop', ip: '192.168.49.1' });
+      setRole('sender', deviceName);
+      setTransferring(true);
+
       if (!isRedirected.current) {
         isRedirected.current = true;
         HapticUtil.celebrate();
         console.log('[SharingScreen] Client joined securely, redirecting to FileTransfer...');
         
         setTimeout(() => {
-          (navigation as any).navigate('FileTransfer', {
-            role: 'sender',
-            deviceName: deviceName,
-            initialFiles: items,
-            secretKey
-          });
+          if (mode === 'pairing') {
+            // Pairing-only mode: go back home
+            (navigation as any).navigate('Home');
+          } else {
+            (navigation as any).replace('FileTransfer', {
+              role: 'sender',
+              deviceName: deviceName,
+              initialFiles: items,
+              secretKey
+            });
+          }
           console.log(`[SharingScreen] Navigation dispatch complete`);
         }, 150);
       } else {
@@ -270,7 +286,9 @@ const SharingScreen = ({ route, navigation }: any) => {
               </View>
 
               <View style={styles.qrRadarWrapper}>
-                <RadarPulse size={width * 0.75} color={colors.primary} numRings={3} />
+                <View style={styles.radarOverlay}>
+                  <RadarPulse size={width * 0.75} color={colors.primary} numRings={3} />
+                </View>
                 <View style={[styles.qrContainer, { backgroundColor: '#FFF', ...layout.shadow.medium }]}>
                   {qrData ? (
                     <QRCode value={qrData} size={width * 0.45} color={colors.primary} backgroundColor="white" />
@@ -293,6 +311,15 @@ const SharingScreen = ({ route, navigation }: any) => {
                   <Text style={[styles.manualText, { color: colors.primary }]}>SSID: {groupInfo.ssid} | Pass: {groupInfo.pass}</Text>
                 </View>
               )}
+
+              {/* Fallback button in case auto-detection is slow */}
+              <TouchableOpacity 
+                style={[styles.doneBtn, { backgroundColor: colors.primary }]}
+                onPress={() => handleClientJoined('Receiver', route.params?.secretKey || 'paired')}
+              >
+                <Text style={styles.doneBtnText}>Start Transfer</Text>
+                <Icon name="chevron-right" size={20} color="#FFF" />
+              </TouchableOpacity>
             </View>
           ) : status === 'error' ? (
             <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 }}>
@@ -399,6 +426,17 @@ const styles = StyleSheet.create({
     width: width * 0.8,
     alignItems: 'center',
     justifyContent: 'center',
+    marginVertical: 10,
+  },
+  radarOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: -1,
   },
   qrContainer: {
     padding: 15,
@@ -417,7 +455,8 @@ const styles = StyleSheet.create({
     padding: 15,
     borderRadius: 16,
     gap: 12,
-    marginVertical: 10,
+    marginVertical: 20,
+    width: '100%',
   },
   instructionText: {
     flex: 1,
@@ -441,6 +480,25 @@ const styles = StyleSheet.create({
   manualText: {
     fontSize: 14,
     fontWeight: '600',
+  },
+  doneBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 30,
+    marginTop: 20,
+    elevation: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+  },
+  doneBtnText: {
+    color: '#FFF',
+    fontSize: 16,
+    fontWeight: '700',
   },
 });
 

@@ -25,7 +25,7 @@ import WiFiDirectTransferService, { DirectTransferStatus } from '../utils/Wifidi
 import ReactNativeBlobUtil from 'react-native-blob-util';
 import { useNavigation } from '@react-navigation/native';
 import { useTheme } from '../theme/ThemeContext';
-import { useConnectionStore, useUIStore } from '../store';
+import { useConnectionStore, useUIStore, useTransferStore } from '../store';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import RadarPulse from '../components/RadarPulse';
 import HapticUtil from '../utils/HapticUtil';
@@ -53,6 +53,7 @@ const ReceiveScreen = ({ route }: any) => {
     setConnected,
     setConnectionDetails
   } = useConnectionStore();
+  const { setRole, setTransferring } = useTransferStore();
 
   // Local state (UI-specific, not persisted)
 
@@ -188,16 +189,23 @@ const ReceiveScreen = ({ route }: any) => {
         setConnected(true);
         setConnectionStatus('connected');
         setConnectionDetails({ type: 'wifi-direct', ssid: 'Direct-FlashDrop', ip: status.ip });
+        setRole('receiver', deviceName);
+        setTransferring(true);
         HapticUtil.success();
         console.log(`[ReceiveScreen] Navigation triggered to FileTransfer (role: receiver, IP: ${status.ip})`);
         
         setTimeout(() => {
-          (navigation as any).navigate('FileTransfer', { 
-              role: 'receiver', 
-              deviceName: deviceName || 'Sender', 
-              initialFiles: [], 
-              secretKey 
-          });
+          if (isConnectMode) {
+            // If we started from 'Scan QR' on Home, just go back to Home which now shows 'Connected'
+            (navigation as any).navigate('Home');
+          } else {
+            (navigation as any).navigate('FileTransfer', { 
+                role: 'receiver', 
+                deviceName: deviceName || 'Sender', 
+                initialFiles: [], 
+                secretKey 
+            });
+          }
         }, 150);
       }
 
@@ -263,7 +271,11 @@ const ReceiveScreen = ({ route }: any) => {
               setConnectionDetails({ type: 'hotspot', ssid, ip });
               HapticUtil.success();
               setTimeout(() => {
-                 (navigation as any).navigate('FileTransfer', { role: 'receiver', deviceName: ssid, initialFiles: [], secretKey });
+                 if (isConnectMode) {
+                   (navigation as any).navigate('Home');
+                 } else {
+                   (navigation as any).navigate('FileTransfer', { role: 'receiver', deviceName: ssid, initialFiles: [], secretKey });
+                 }
               }, 150);
               return;
            }
