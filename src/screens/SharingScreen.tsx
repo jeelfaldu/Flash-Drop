@@ -18,6 +18,7 @@ import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
 import LinearGradient from 'react-native-linear-gradient';
 import QRCode from 'react-native-qrcode-svg';
 import WiFiDirectTransferService, { DirectTransferStatus } from '../utils/Wifidirecttransferservice';
+import WiFiDirectTransferServiceV2, { DirectTransferStatusV2 } from '../utils/WiFiDirectTransferServiceV2';
 import TransferServer from '../utils/TransferServer';
 import WifiManager from 'react-native-wifi-reborn';
 import DeviceInfo from 'react-native-device-info';
@@ -29,7 +30,7 @@ import HapticUtil from '../utils/HapticUtil';
 const { width } = Dimensions.get('window');
 
 const SharingScreen = ({ route, navigation }: any) => {
-  const { items = [], mode } = route.params || {};
+  const { items = [], mode, v2 } = route.params || {};
   const { colors, typography, layout, spacing, isDark } = useTheme();
   const isRedirected = useRef(false);
 
@@ -56,12 +57,14 @@ const SharingScreen = ({ route, navigation }: any) => {
     // Initial cleanup before setup
     const init = async () => {
       await WiFiDirectTransferService.stop();
+      await WiFiDirectTransferServiceV2.stop();
       setupHotspot();
     };
     init();
 
     const onBackPress = () => {
       WiFiDirectTransferService.stop();
+      WiFiDirectTransferServiceV2.stop();
       if (navigation.canGoBack()) navigation.goBack();
       else (navigation as any).navigate('Home');
       return true;
@@ -77,6 +80,7 @@ const SharingScreen = ({ route, navigation }: any) => {
       // so the other device can still find us.
       if (!isRedirected.current && status !== 'ready' && status !== 'connected') {
         WiFiDirectTransferService.stop();
+        WiFiDirectTransferServiceV2.stop();
       }
     };
   }, []);
@@ -173,9 +177,19 @@ const SharingScreen = ({ route, navigation }: any) => {
             }
           };
 
-          console.log(`[SharingScreen] Initializing startSender() for Wi-Fi Direct`);
-          await WiFiDirectTransferService.startSender(items, secretKey);
-
+          if (v2) {
+            WiFiDirectTransferServiceV2.onStatus = (s: DirectTransferStatusV2) => {
+              if (s.type === 'ready') {
+                setConnected(true);
+                setConnectionDetails({ type: 'wifi-direct', ssid: 'Direct-FlashDrop-V2', ip: s.ip });
+                setQrData(JSON.stringify({ ip: s.ip, v2: true, name: DeviceInfo.getDeviceNameSync() }));
+                setStatus('ready');
+              }
+            };
+            await WiFiDirectTransferServiceV2.startSender(items);
+          } else {
+            await WiFiDirectTransferService.startSender(items, secretKey);
+          }
           console.log(`[SharingScreen] startSender() Promise resolved`);
         } else {
           // iOS / Local Network Fallback
@@ -222,10 +236,9 @@ const SharingScreen = ({ route, navigation }: any) => {
         
         setTimeout(() => {
           if (mode === 'pairing') {
-            // Pairing-only mode: go back home
             (navigation as any).navigate('Home');
           } else {
-            (navigation as any).replace('FileTransfer', {
+            (navigation as any).replace(v2 ? 'FileTransferV2' : 'FileTransfer', {
               role: 'sender',
               deviceName: deviceName,
               initialFiles: items,
@@ -258,8 +271,8 @@ const SharingScreen = ({ route, navigation }: any) => {
           <View style={styles.headerContent}>
             <TouchableOpacity
               onPress={() => {
-                // Cleanup if user backs out before connecting
                 WiFiDirectTransferService.stop();
+                WiFiDirectTransferServiceV2.stop();
                 navigation.goBack();
               }}
               style={styles.iconButton}

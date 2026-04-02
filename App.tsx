@@ -7,10 +7,14 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import HomeScreen from './src/screens/HomeScreen';
 import SendScreen from './src/screens/SendScreen';
 import ReceiveScreen from './src/screens/ReceiveScreen';
+import ReceiveScreenV2 from './src/screens/ReceiveScreenV2';
 import HistoryScreen from './src/screens/HistoryScreen';
 import SharingScreen from './src/screens/SharingScreen';
+import SharingScreenV2 from './src/screens/SharingScreenV2';
 import FileTransferScreen from './src/screens/FileTransferScreen';
+import FileTransferScreenV2 from './src/screens/FileTransferScreenV2';
 import PCConnectionScreen from './src/screens/PCConnectionScreen';
+import PCConnectionScreenV2 from './src/screens/PCConnectionScreenV2';
 import OnboardingScreen from './src/screens/OnboardingScreen';
 import { requestConnectPermissions } from './src/utils/permissionHelper';
 import { ThemeProvider, useTheme } from './src/theme/ThemeContext';
@@ -112,10 +116,14 @@ const AppNavigator = () => {
         <Stack.Screen name="Home" component={HomeScreen} />
         <Stack.Screen name="Send" component={SendScreen} />
         <Stack.Screen name="Receive" component={ReceiveScreen} />
+        <Stack.Screen name="ReceiveV2" component={ReceiveScreenV2} />
         <Stack.Screen name="History" component={HistoryScreen} />
         <Stack.Screen name="Sharing" component={SharingScreen} />
+        <Stack.Screen name="SharingV2" component={SharingScreenV2} />
         <Stack.Screen name="FileTransfer" component={FileTransferScreen} />
+        <Stack.Screen name="FileTransferV2" component={FileTransferScreenV2} />
         <Stack.Screen name="PCConnection" component={PCConnectionScreen} />
+        <Stack.Screen name="PCConnectionV2" component={PCConnectionScreenV2} />
       </Stack.Navigator>
     </NavigationContainer>
   );

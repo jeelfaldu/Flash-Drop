@@ -157,8 +157,9 @@ const SendScreen = ({ navigation, route }: any) => {
         });
       }
     } else {
-      console.log(`[SendScreen] No active session. Pushing SharingScreen for P2P setup...`);
-      navigation.navigate('Sharing', { items: selectedItems });
+      const isV2 = !!route.params?.v2;
+      console.log(`[SendScreen] No active session. Pushing ${isV2 ? 'SharingV2' : 'Sharing'}...`);
+      navigation.navigate(isV2 ? 'SharingV2' : 'Sharing', { items: selectedItems });
     }
 
     setTimeout(() => {

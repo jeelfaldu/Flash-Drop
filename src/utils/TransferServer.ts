@@ -1,478 +1,444 @@
-// TransferServer.ts (STABLE VERSION WITH PC-TO-MOBILE SUPPORT)
-
 import TcpSocket from 'react-native-tcp-socket';
-import ReactNativeBlobUtil from 'react-native-blob-util';
-import crypto from 'react-native-quick-crypto';
-import { Buffer } from 'buffer';
+import RNBlobUtil from 'react-native-blob-util';
 import { Platform } from 'react-native';
-
-import { saveHistoryItem } from './HistoryService';
 import DiscoveryManager from './DiscoveryManager';
-import { HTML_CONTENT_BASE64 } from './Constant';
+import { Buffer } from 'buffer';
 
-export type ServerContext = 'pc' | 'p2p';
-export type ServerStatus = {
-  type: 'client_connected' | 'client_disconnected' | 'progress' | 'upload_progress' | 'complete' | 'error' | 'log';
-  context?: ServerContext;
+export interface ServerStatus {
+  type: 'listening' | 'client_connected' | 'client_disconnected' | 'progress' | 'upload_progress' | 'complete' | 'error';
+  port?: number;
   clientAddress?: string;
-  fileProgress?: {
-    name: string;
-    percent: number;
-    sent: number;
-    total: number;
-    speed?: number;
-    etaSecs?: number;
-  };
+  progress?: number;
+  fileName?: string;
   message?: string;
-};
-
-class SpeedTracker {
-  private t0 = 0;
-  private b0 = 0;
-
-  begin(bytes: number) {
-    this.t0 = Date.now();
-    this.b0 = bytes;
-  }
-
-  sample(bytes: number, total: number) {
-    const dt = (Date.now() - this.t0) / 1000;
-    if (dt < 0.3) return { speed: 0, etaSecs: 0 };
-
-    const speed = Math.round((bytes - this.b0) / dt);
-    const remaining = total - bytes;
-    const etaSecs = speed > 0 ? Math.round(remaining / speed) : 0;
-
-    return { speed, etaSecs };
-  }
+  fileProgress?: { name: string; percent: number; sent: number; total: number; speed?: number };
 }
 
-export class TransferServer {
-  server: any = null;
-  filesToSend: any[] = [];
-  statusCallback?: (status: ServerStatus) => void;
-  private statusListeners: Set<(status: ServerStatus) => void> = new Set();
-
-  public addStatusListener(listener: (status: ServerStatus) => void) {
-    this.statusListeners.add(listener);
-  }
-
-  public removeStatusListener(listener: (status: ServerStatus) => void) {
-    this.statusListeners.delete(listener);
-  }
-
-  private report(status: ServerStatus) {
-    const finalStatus = { ...status, context: this.currentContext || 'p2p' };
-    this.statusCallback?.(finalStatus);
-    this.statusListeners.forEach(l => l(finalStatus));
-  }
-  private currentContext: ServerContext | null = null;
-  private currentPort = 8888;
-  private globalFileQueue = Promise.resolve();
-  private connectedClients = new Set<string>();
-  private peerIp: string | null = null;
-  private peerServerPort = 8888;
-  private peerRegisteredCb?: (ip: string, port: number) => void;
-  private secretKey?: string;
-
-  private tokens = new Map<string, { token: string; ip: string; expires: number }>();
-
-  private getPage() {
-    return Buffer.from(HTML_CONTENT_BASE64, 'base64').toString('utf-8');
-  }
-
-  private getAuthData(file: any, ip: string) {
-    const key = `${file.name}|${file.size}|${ip}`;
-    const existing = this.tokens.get(key);
-    if (existing && existing.expires > Date.now()) {
-      return existing.token;
+// ─── Full HTML web UI served at GET / ────────────────────────────────────────
+const WEB_UI = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FlashDrop - PC Connect</title>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box;font-family:'Outfit',sans-serif}
+:root{--p:#2563EB;--pd:#1E40AF;--g:#10B981;--bg:#F8FAFC;--w:#fff;--t:#1E293B;--m:#64748B;--b:#E2E8F0}
+body{background:var(--bg);color:var(--t);min-height:100vh;display:flex;flex-direction:column}
+header{background:var(--w);padding:1rem 2rem;display:flex;justify-content:space-between;align-items:center;box-shadow:0 1px 3px rgba(0,0,0,.06);position:sticky;top:0;z-index:10}
+.logo{font-size:1.4rem;font-weight:800;color:var(--p);display:flex;align-items:center;gap:.5rem}
+.badge{background:#DCFCE7;color:#166534;padding:.25rem .75rem;border-radius:99px;font-size:.8rem;font-weight:600;display:flex;align-items:center;gap:.4rem}
+.dot{width:7px;height:7px;background:#16a34a;border-radius:50%;animation:blink 1.5s infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+main{flex:1;padding:2rem;max-width:1100px;margin:0 auto;width:100%;display:grid;grid-template-columns:1fr 1fr;gap:1.5rem}
+.card{background:var(--w);border-radius:1.25rem;padding:1.75rem;border:1px solid var(--b);box-shadow:0 2px 8px rgba(0,0,0,.04)}
+.card-title{font-size:1.1rem;font-weight:700;margin-bottom:.25rem}
+.card-sub{font-size:.85rem;color:var(--m);margin-bottom:1.25rem}
+.dropzone{border:2px dashed var(--b);border-radius:1rem;padding:2.5rem 1rem;text-align:center;background:#FAFAFA;cursor:pointer;transition:all .2s}
+.dropzone.over{border-color:var(--p);background:#EFF6FF}
+.dz-icon{font-size:2.2rem;margin-bottom:.75rem}
+.dz-title{font-weight:600;font-size:.95rem;margin-bottom:.25rem}
+.dz-sub{font-size:.8rem;color:var(--m)}
+.btn{background:var(--p);color:#fff;border:none;padding:.6rem 1.25rem;border-radius:.6rem;font-weight:600;font-size:.85rem;cursor:pointer;transition:background .2s;display:inline-flex;align-items:center;gap:.4rem;margin-top:.75rem}
+.btn:hover{background:var(--pd)}
+.btn-outline{background:#fff;color:var(--t);border:1px solid var(--b)}
+.btn-outline:hover{background:#F1F5F9}
+.prog-list{margin-top:1rem;display:flex;flex-direction:column;gap:.6rem}
+.prog-item{background:#F8FAFC;border:1px solid var(--b);border-radius:.75rem;padding:.75rem}
+.prog-name{font-size:.82rem;font-weight:600;margin-bottom:.4rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.prog-track{background:#E2E8F0;border-radius:99px;height:6px;overflow:hidden}
+.prog-fill{height:100%;background:var(--p);border-radius:99px;width:0%;transition:width .3s}
+.prog-fill.done{background:var(--g)}
+.prog-meta{display:flex;justify-content:space-between;font-size:.75rem;color:var(--m);margin-top:.3rem}
+.file-list{display:flex;flex-direction:column;gap:.6rem}
+.file-item{display:flex;align-items:center;gap:.75rem;padding:.75rem;border:1px solid var(--b);border-radius:.75rem}
+.file-icon{width:2.2rem;height:2.2rem;background:#EFF6FF;color:var(--p);border-radius:.5rem;display:flex;align-items:center;justify-content:center;font-size:1.2rem;flex-shrink:0}
+.file-info{flex:1;min-width:0}
+.file-name{font-weight:600;font-size:.85rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.file-size{font-size:.75rem;color:var(--m)}
+.empty{text-align:center;padding:2.5rem 1rem;color:var(--m)}
+.empty-icon{font-size:2rem;opacity:.3;display:block;margin-bottom:.5rem}
+@media(max-width:700px){main{grid-template-columns:1fr;padding:1rem}}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">&#9889; FlashDrop</div>
+  <div class="badge"><span class="dot"></span> Connected</div>
+</header>
+<main>
+  <section class="card">
+    <div class="card-title">&#128228; Send to Phone</div>
+    <div class="card-sub">Select or drag files to transfer to your mobile device</div>
+    <div class="dropzone" id="dropzone">
+      <div class="dz-icon">&#9729;</div>
+      <div class="dz-title">Drop files here</div>
+      <div class="dz-sub" style="margin-bottom:.75rem">or click the button below</div>
+      <button class="btn" id="selectBtn">&#128193; Select Files</button>
+      <input type="file" id="fileInput" multiple hidden>
+    </div>
+    <div class="prog-list" id="progList"></div>
+  </section>
+  <section class="card">
+    <div class="card-title">&#128229; Receive from Phone</div>
+    <div class="card-sub">Files shared from your phone appear here for download</div>
+    <div class="file-list" id="fileList">
+      <div class="empty"><span class="empty-icon">&#128194;</span>No files shared yet</div>
+    </div>
+  </section>
+</main>
+<script>
+(function(){
+  var dz=document.getElementById('dropzone'),fi=document.getElementById('fileInput'),sb=document.getElementById('selectBtn'),pl=document.getElementById('progList'),fl=document.getElementById('fileList');
+  sb.addEventListener('click',function(e){e.stopPropagation();fi.click()});
+  fi.addEventListener('change',function(){startUploads(fi.files);fi.value='';});
+  dz.addEventListener('click',function(){fi.click()});
+  dz.addEventListener('dragover',function(e){e.preventDefault();dz.classList.add('over')});
+  dz.addEventListener('dragleave',function(){dz.classList.remove('over')});
+  dz.addEventListener('drop',function(e){e.preventDefault();dz.classList.remove('over');startUploads(e.dataTransfer.files)});
+  var queue=[],busy=false;
+  function startUploads(files){for(var i=0;i<files.length;i++){queue.push(files[i]);mkRow(files[i].name,files[i].size);}if(!busy)pump();}
+  async function pump(){if(!queue.length){busy=false;return;}busy=true;await upload(queue.shift());pump();}
+  async function upload(file){
+    var total=file.size,offset=0,CHUNK=4*1024*1024;
+    setPct(file.name,0,0,total);
+    while(offset<total){
+      var end=Math.min(offset+CHUNK,total),last=(end>=total)?1:0,blob=file.slice(offset,end);
+      var url='/api/upload?name='+encodeURIComponent(file.name)+'&size='+total+'&offset='+offset+'&last='+last;
+      var ok=await sendChunk(url,blob,file.name,offset,total);
+      if(!ok){setErr(file.name);return;}
+      offset=end;setPct(file.name,last?100:Math.floor(offset/total*100),offset,total);
     }
-    const token = crypto.randomBytes(12).toString('hex');
-    this.tokens.set(key, {
-      token,
-      ip,
-      expires: Date.now() + 30 * 60 * 1000, // 30 mins
-    });
-    return token;
   }
-
-  // ================= PIPE =================
-  private async pipeToSocket(socket: any, path: string, fileSize: number, start: number, end: number, name: string, tracker: SpeedTracker) {
-    if (!socket || socket.destroyed) return;
-    const CHUNK = 512 * 1024;
-    let offset = start;
-    let lastReport = start;
-    tracker.begin(start);
-    
-    return new Promise<void>(async (resolve, reject) => {
-      try {
-        const stream = await ReactNativeBlobUtil.fs.readStream(path, 'base64', CHUNK, start);
-        let isPaused = false;
-
-        socket.on('drain', () => {
-          if (isPaused) {
-            isPaused = false;
-            // Native readStream may not have resume() in all versions, 
-            // but we check if it's accessible.
-            (stream as any).resume?.();
-          }
-        });
-        
-        stream.onData((chunk: string | number[]) => {
-          if (socket.destroyed) {
-            (stream as any).close?.();
-            return reject(new Error('Socket destroyed'));
-          }
-
-          let binary: Buffer;
-          if (typeof chunk === 'string') {
-            binary = Buffer.from(chunk, 'base64');
-          } else {
-            binary = Buffer.from(chunk as number[]);
-          }
-
-          const canWrite = socket.write(binary);
-          offset += binary.length;
-
-          if (offset - lastReport >= 512 * 1024) {
-            lastReport = offset;
-            const pct = Math.min(100, Math.floor((offset / fileSize) * 100));
-            const { speed, etaSecs } = tracker.sample(offset, fileSize);
-            this.report({ type: 'progress', fileProgress: { name, percent: pct, sent: offset, total: fileSize, speed, etaSecs } });
-          }
-
-          if (!canWrite && !isPaused) {
-            isPaused = true;
-            (stream as any).pause?.();
-          }
-        });
-
-        stream.onEnd(() => {
-          this.report({ type: 'progress', fileProgress: { name, percent: 100, sent: fileSize, total: fileSize, speed: 0, etaSecs: 0 } });
-          setTimeout(() => {
-            if (!socket.destroyed) socket.end();
-            resolve();
-          }, 100);
-        });
-
-        stream.onError((err) => {
-          reject(err);
-        });
-
-        stream.open();
-      } catch (err) {
-        reject(err);
-      }
+  function sendChunk(url,blob,name,cur,tot){
+    return new Promise(function(res){
+      var x=new XMLHttpRequest();x.timeout=0;
+      x.upload.addEventListener('progress',function(e){if(e.lengthComputable){var s=cur+e.loaded;setPct(name,Math.floor(s/tot*100),s,tot);}});
+      x.onload=function(){res(x.status===200)};x.onerror=function(){res(false)};x.ontimeout=function(){res(false)};
+      x.open('POST',url);x.send(blob);
     });
   }
+  function mkRow(name,tot){var id=rid(name);if(document.getElementById(id))return;var r=document.createElement('div');r.id=id;r.className='prog-item';r.innerHTML='<div class="prog-name" title="'+esc(name)+'">'+esc(name)+'</div><div class="prog-track"><div class="prog-fill" id="'+id+'_f"></div></div><div class="prog-meta"><span id="'+id+'_p">0%</span><span id="'+id+'_s">0 / '+fmt(tot)+'</span></div>';pl.appendChild(r);}
+  function setPct(name,pct,sent,tot){var id=rid(name),f=document.getElementById(id+'_f'),p=document.getElementById(id+'_p'),s=document.getElementById(id+'_s');if(f){f.style.width=pct+'%';if(pct>=100)f.classList.add('done');}if(p)p.textContent=pct>=100?'Done!':pct+'%';if(s)s.textContent=fmt(sent)+' / '+fmt(tot);}
+  function setErr(name){var id=rid(name),f=document.getElementById(id+'_f'),p=document.getElementById(id+'_p');if(f)f.style.background='#EF4444';if(p)p.textContent='Failed';}
+  function rid(n){return'row_'+n.replace(/[^a-zA-Z0-9]/g,'_');}
+  function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+  async function loadFiles(){try{var r=await fetch('/api/files'),files=await r.json();fl.innerHTML='';if(!files.length){fl.innerHTML='<div class="empty"><span class="empty-icon">&#128194;</span>No files shared yet</div>';return;}files.forEach(function(f){var d=document.createElement('div');d.className='file-item';d.innerHTML='<div class="file-icon">&#128196;</div><div class="file-info"><div class="file-name" title="'+esc(f.name)+'">'+esc(f.name)+'</div><div class="file-size">'+fmt(f.size)+'</div></div><a href="/api/download?name='+encodeURIComponent(f.name)+'" class="btn btn-outline" style="text-decoration:none;padding:.5rem .75rem">&#8659;</a>';fl.appendChild(d);});}catch(e){}}
+  function fmt(b){if(!b||typeof b!=='number')return'0 B';var k=1024,u=['B','KB','MB','GB'],i=Math.floor(Math.log(b)/Math.log(k));return(b/Math.pow(k,i)).toFixed(i?1:0)+' '+u[i];}
+  loadFiles();setInterval(loadFiles,5000);
+})();
+</script>
+</body>
+</html>`;
 
-  // ================= START =================
-  start(port = 8888, files: any[] = [], onStatus?: any, secretKey?: string, context: ServerContext = 'p2p') {
-    this.currentPort = port;
-    this.currentContext = context;
-    if (!this.server || files.length > 0) {
-      this.filesToSend = files;
+class TransferServer {
+  private server: any = null;
+  public statusCallback: ((status: any) => void) | null = null;
+  private filesToSend: any[] = [];
+  private activeSockets: Map<string, any> = new Map();
+
+  // ── Per-upload state ────────────────────────────────────────────────────────
+  private upload: {
+    active: boolean;
+    finalized: boolean;
+    fileName: string;
+    fileSize: number;
+    received: number;
+    tempPath: string;
+    finalPath: string;
+    stream: any;
+    writeQueue: Promise<void>;
+  } = { active: false, finalized: false, fileName: '', fileSize: 0, received: 0, tempPath: '', finalPath: '', stream: null, writeQueue: Promise.resolve() };
+
+  constructor() {}
+
+  public start(port: number, files: any[], onStatus?: (status: any) => void) {
+    if (onStatus) this.statusCallback = onStatus;
+    if (files.length > 0) this.filesToSend = files;
+
+    if (this.server) {
+      // Already running, just report current status
+      setTimeout(() => this.report({ type: 'listening', port }), 10);
+      return { port };
     }
-    this.statusCallback = onStatus;
-    this.secretKey = secretKey;
 
-    if (this.server) return { port };
+    try {
+      this.server = TcpSocket.createServer((socket: any) => {
+        const remoteIp = (socket.remoteAddress || 'unknown').replace('::ffff:', '');
+        this.activeSockets.set(remoteIp, socket);
+        this.report({ type: 'client_connected', clientAddress: remoteIp });
 
-    this.server = TcpSocket.createServer((socket: any) => {
-      const remoteIp = socket.remoteAddress?.replace('::ffff:', '') || 'unknown';
-      this.handleClientConnected(remoteIp);
+        let rxBufs: Buffer[] = [];
+        let rxLen = 0;
+        let isBody = false;
+        let bodyExpected = 0;
+        let currentRequest: any = null;
+        let bodyReceived = 0;
 
-      socket.setTimeout(120000); // 120s for slow networks
-      socket.on('timeout', () => socket.destroy());
+        socket.on('data', async (chunk: Buffer) => {
+          if (!isBody) {
+            rxBufs.push(chunk); rxLen += chunk.length;
+            const buf = Buffer.concat(rxBufs);
+            const sep = buf.indexOf('\r\n\r\n');
+            if (sep === -1) return;
 
-      let rxBufs: Buffer[] = [];
-      let rxLen = 0;
-      let isBody = false;
-      let bodyExpected = 0;
-      let bodyReceived = 0;
-      let lastReportedBody = 0;
-      let currentRequest: any = null;
-      let urlParams: any = null;
-      let processingChain = Promise.resolve();
+            const headers = buf.slice(0, sep).toString();
+            const bodyStart = buf.slice(sep + 4);
+            rxBufs = []; rxLen = 0;
 
-      socket.on('data', (chunk: Buffer) => {
-        // PERFORMANCE: If we are collecting a POST body, just push to buffer. 
-        // Avoid bridge calls (pause/resume) and promise overhead for every 16KB packet.
-        if (isBody) {
-          rxBufs.push(chunk);
-          bodyReceived += chunk.length;
-          
-          // REAL-TIME REPORTING: Update UI as bytes arrive on network
-          if (bodyReceived - lastReportedBody > 256 * 1024 && urlParams) {
-            lastReportedBody = bodyReceived;
-            this.report({
-              type: 'upload_progress',
-              fileProgress: {
-                name: urlParams.name,
-                percent: Math.min(99, Math.floor(((urlParams.offset + bodyReceived) / urlParams.totalSize) * 100)),
-                sent: urlParams.offset + bodyReceived,
-                total: urlParams.totalSize
-              }
-            });
-          }
+            const lines = headers.split('\r\n');
+            const [method, rawPath] = lines[0].split(' ');
+            if (!method || !rawPath) return;
 
-          if (bodyReceived >= bodyExpected) {
-            const fullBody = Buffer.concat(rxBufs);
-            rxBufs = []; isBody = false;
-            
-            socket.pause();
-            processingChain = processingChain.then(async () => {
-              try {
-                if (currentRequest?.path.startsWith('/api/upload')) {
-                  await this.handleUploadChunk(socket, currentRequest, fullBody, true, true);
-                }
-              } finally {
-                if (socket.readyState === 'open') socket.resume();
-              }
-            });
-          }
-          return;
-        }
+            console.log(`[TRANSFER SERVER] ${method} ${rawPath} from ${remoteIp}`);
+            const contentLenMatch = headers.match(/Content-Length:\s*(\d+)/i);
+            bodyExpected = contentLenMatch ? parseInt(contentLenMatch[1], 10) : 0;
+            currentRequest = { method, path: rawPath, headers };
 
-        // Standard header parsing path (happens once per request)
-        socket.pause(); 
-        processingChain = processingChain.then(async () => {
-          try {
-            if (!isBody) {
-              rxBufs.push(chunk);
-              rxLen += chunk.length;
-              const buf = Buffer.concat(rxBufs, rxLen);
-              const sep = buf.indexOf('\r\n\r\n');
-              if (sep === -1) {
-                if (socket.readyState === 'open') socket.resume();
-                return;
-              }
+            if (method === 'GET' || method === 'HEAD') {
+              this.handleGet(socket, rawPath, remoteIp);
+              return;
+            }
 
-              const headers = buf.slice(0, sep).toString();
-              const bodyStart = buf.slice(sep + 4);
-              rxBufs = []; rxLen = 0;
-
-              const lines = headers.split('\r\n');
-              const [method, rawPath] = lines[0].split(' ');
-              if (!method || !rawPath) {
-                if (socket.readyState === 'open') socket.resume();
-                return;
-              }
-
-              const contentLengthMatch = headers.match(/Content-Length: (\d+)/i);
-              const contentLength = contentLengthMatch ? parseInt(contentLengthMatch[1], 10) : 0;
-              currentRequest = { method, path: rawPath, headers };
-
-              if (method === 'POST') {
-                bodyExpected = contentLength;
-                bodyReceived = bodyStart.length;
-                rxBufs = [bodyStart]; 
-                
-                // Prepare params for real-time progress
-                const name = decodeURIComponent(rawPath.match(/name=([^& ]+)/)?.[1] || 'unnamed');
-                const totalSize = parseInt(rawPath.match(/size=(\d+)/)?.[1] || '0', 10);
-                const offset = parseInt(rawPath.match(/offset=(\d+)/)?.[1] || '0', 10);
-                urlParams = { name, totalSize, offset };
-                lastReportedBody = bodyReceived;
-
-                if (bodyReceived >= bodyExpected) {
-                  const fullBody = Buffer.concat(rxBufs);
-                  if (rawPath.startsWith('/api/upload')) {
-                    await this.handleUploadChunk(socket, currentRequest, fullBody, false, true);
-                  }
-                  isBody = false; rxBufs = [];
-                } else {
-                  isBody = true; // Switch to fast-path for next packets
-                }
+            if (method === 'POST') {
+              isBody = true;
+              bodyReceived = bodyStart.length;
+              rxBufs = []; // No longer need rxBufs for large bodies as we stream them
+              
+              const isDone = bodyExpected > 0 && bodyReceived >= bodyExpected;
+              if (rawPath.startsWith('/api/v2/handshake')) {
+                 if (isDone) { await this.handleHandshake(socket, bodyStart, remoteIp); isBody = false; }
+                 else { rxBufs = [bodyStart]; } // Handshake needs full buffer
+              } else if (rawPath.startsWith('/api/upload')) {
+                await this.handleUploadChunk(socket, currentRequest, bodyStart, false, isDone);
+                if (isDone) isBody = false;
               } else {
-                this.handleGet(socket, currentRequest, remoteIp);
+                 rxBufs = [bodyStart]; // Other POSTs
+                 if (isDone) isBody = false;
               }
             }
-
-            if (socket.readyState === 'open') {
-              socket.resume();
+          } else {
+            bodyReceived += chunk.length;
+            if (currentRequest?.path.startsWith('/api/v2/handshake')) {
+              rxBufs.push(chunk);
+              if (bodyReceived >= bodyExpected) {
+                const fullBody = Buffer.concat(rxBufs);
+                await this.handleHandshake(socket, fullBody, remoteIp);
+                isBody = false; rxBufs = [];
+              }
+            } else if (currentRequest?.path.startsWith('/api/upload')) {
+              const isDone = bodyReceived >= bodyExpected;
+              await this.handleUploadChunk(socket, currentRequest, chunk, true, isDone);
+              if (isDone) { isBody = false; rxBufs = []; }
+            } else {
+              rxBufs.push(chunk);
+              if (bodyReceived >= bodyExpected) { isBody = false; rxBufs = []; }
             }
-          } catch (e: any) {
-            console.error('[SERVER DATA PROCESSING ERROR]', e);
-            socket.destroy();
           }
+        });
+
+        socket.on('error', (err: any) => {
+          console.error(`[TRANSFER SERVER] Socket error from ${remoteIp}:`, err.message);
+          this.activeSockets.delete(remoteIp);
+        });
+
+        socket.on('close', () => {
+          this.report({ type: 'client_disconnected', clientAddress: remoteIp });
+          this.activeSockets.delete(remoteIp);
         });
       });
 
-      socket.on('close', () => {
-        this.handleClientDisconnected(remoteIp);
+      this.server.listen({ port, host: '0.0.0.0' }, () => {
+        console.log(`[TRANSFER SERVER] Listening on port ${port}`);
+        this.report({ type: 'listening', port });
+        DiscoveryManager.publishService(port);
       });
 
-      socket.on('error', (err: any) => {
-        socket.destroy();
+      this.server.on('error', (err: any) => {
+        this.report({ type: 'error', message: err.message });
       });
 
-    }).listen({ port, host: '0.0.0.0' }, () => {
-      DiscoveryManager.publishService(port);
-    });
+    } catch (e: any) {
+      this.report({ type: 'error', message: e.message });
+    }
 
     return { port };
   }
 
-  private handleGet(socket: any, req: any, remoteIp: string) {
-    const { path } = req;
+  // ── GET handler ─────────────────────────────────────────────────────────────
+  private handleGet(socket: any, rawPath: string, remoteIp: string) {
+    const qi = rawPath.indexOf('?');
+    const path = qi >= 0 ? rawPath.slice(0, qi) : rawPath;
 
-    if (path.startsWith('/api/files')) {
-      const list = this.filesToSend.map(f => ({
-        ...f,
-        token: this.getAuthData(f, remoteIp),
-      }));
-      const body = JSON.stringify(list);
-      socket.end(`HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`);
-    } else if (path.startsWith('/api/download')) {
-      this.processDownload(socket, path);
-    } else if (path === '/' || path === '/index.html' || path === '') {
-      const html = this.getPage();
-      socket.end(`HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n${html}`);
-    } else {
-      socket.end('HTTP/1.1 404 Not Found\r\n\r\n');
-    }
-  }
-
-  private async processDownload(socket: any, path: string) {
-    const name = decodeURIComponent(path.match(/name=([^& ]+)/)?.[1] || '');
-    const token = path.match(/token=([^& ]+)/)?.[1] || '';
-    const file = this.filesToSend.find(f => f.name === name);
-
-    if (!file) return socket.end('HTTP/1.1 404 Not Found\r\n\r\n');
-
-    // Token check
-    const remoteIp = socket.remoteAddress?.replace('::ffff:', '') || '';
-    const tokenData = this.tokens.get(`${file.name}|${file.size}|${remoteIp}`);
-    if (!tokenData || tokenData.token !== token) {
-      return socket.end('HTTP/1.1 403 Forbidden\r\n\r\n');
+    // Root — serve the web UI
+    if (path === '/' || path === '/index.html') {
+      const html = WEB_UI;
+      const bytes = Buffer.byteLength(html, 'utf8');
+      const response = `HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ${bytes}\r\nConnection: close\r\n\r\n${html}`;
+      if (!socket.destroyed) try { socket.write(response, 'utf8', () => { if (!socket.destroyed) socket.end(); }); } catch (_) { socket.destroy(); }
+      return;
     }
 
-    try {
-      const stat = await ReactNativeBlobUtil.fs.stat(file.uri);
-      const size = stat.size;
-      
-      const headers = [
-        'HTTP/1.1 200 OK',
-        'Content-Type: application/octet-stream',
-        `Content-Length: ${size}`,
-        `Content-Disposition: attachment; filename="${encodeURIComponent(file.name)}"`,
-        'Connection: close',
-        '',
-        ''
-      ].join('\r\n');
-
-      socket.write(headers);
-      await this.pipeToSocket(socket, file.uri, size, 0, size - 1, file.name, new SpeedTracker());
-    } catch (e) {
-      socket.end('HTTP/1.1 500 Internal Server Error\r\n\r\n');
+    // File list API (browser polls this)
+    if (path === '/api/files') {
+      const list = JSON.stringify(this.filesToSend.map(f => ({ name: f.name, size: f.size })));
+      const bytes = Buffer.byteLength(list);
+      socket.end(
+        `HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: ${bytes}\r\nConnection: close\r\n\r\n${list}`
+      );
+      return;
     }
-  }
 
-  private async handleUploadChunk(socket: any, req: any, chunk: Buffer, isContinued = false, isDone = true) {
-    const path = req.path;
-    const name = decodeURIComponent(path.match(/name=([^& ]+)/)?.[1] || 'unnamed');
-    const totalSize = parseInt(path.match(/size=(\d+)/)?.[1] || '0', 10);
-    const offset = parseInt(path.match(/offset=(\d+)/)?.[1] || '0', 10);
-    const isLast = path.includes('last=1');
-    const remoteIp = socket.remoteAddress?.replace('::ffff:', '') || '0_0_0_0';
-    const saveDir = Platform.OS === 'android'
-      ? `${ReactNativeBlobUtil.fs.dirs.DownloadDir}/FlashDrop`
-      : `${ReactNativeBlobUtil.fs.dirs.DocumentDir}/FlashDrop`;
-    
-    const tempPath = `${saveDir}/.tmp_${remoteIp.replace(/\./g, '_')}_${name}`;
+    // Download file
+    if (path === '/api/download') {
+      this.processDownload(socket, rawPath);
+      return;
+    }
 
-    try {
-      await this.globalFileQueue.then(async () => {
-        try {
-          if (chunk.length > 0) {
-            if (!(await ReactNativeBlobUtil.fs.exists(saveDir))) {
-              await ReactNativeBlobUtil.fs.mkdir(saveDir);
-            }
-
-            const dataBase64 = chunk.toString('base64');
-            if (!isContinued && offset === 0) {
-              await ReactNativeBlobUtil.fs.writeFile(tempPath, dataBase64, 'base64');
-            } else {
-              await ReactNativeBlobUtil.fs.appendFile(tempPath, dataBase64, 'base64');
-            }
-          }
-        } catch (e) {
-          console.error('[handleUploadChunk] File Write Error:', e);
-          throw e;
-        }
-      });
-
-      if (!isDone) return;
-
-      this.report({
-        type: 'upload_progress',
-        fileProgress: {
-          name,
-          percent: Math.min(100, Math.floor(((offset + chunk.length) / totalSize) * 100)),
-          sent: offset + chunk.length,
-          total: totalSize
-        }
-      });
-
-      if (isLast) {
-        const finalPath = `${saveDir}/${name}`;
-        await this.globalFileQueue.then(async () => {
-          if (await ReactNativeBlobUtil.fs.exists(finalPath)) {
-            await ReactNativeBlobUtil.fs.unlink(finalPath);
-          }
-          await ReactNativeBlobUtil.fs.mv(tempPath, finalPath);
-        });
-        this.report({ type: 'complete', message: `Received ${name}` });
-        saveHistoryItem({ fileName: name, fileSize: totalSize, type: 'file', role: 'received', status: 'success' });
-      }
-
+    // V2 handshake (GET form — just ACK)
+    if (path.startsWith('/api/v2/handshake')) {
       socket.end('HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
-    } catch (e: any) {
-      console.log('[UPLOAD ERROR]', e);
-      socket.end('HTTP/1.1 500 Server Error\r\n\r\n');
+      return;
+    }
+
+    // 404
+    socket.end('HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nNot Found');
+  }
+
+  // ── Download file to PC ─────────────────────────────────────────────────────
+  private async processDownload(socket: any, rawPath: string) {
+    const qi = rawPath.indexOf('?');
+    const qs = qi >= 0 ? rawPath.slice(qi + 1) : '';
+    const params: Record<string, string> = {};
+    qs.split('&').forEach(p => { const eq = p.indexOf('='); if (eq > 0) params[decodeURIComponent(p.slice(0, eq))] = decodeURIComponent(p.slice(eq + 1)); });
+
+    const fileName = params['name'] || '';
+    const file = this.filesToSend.find(f => f.name === fileName);
+    if (!file) {
+      socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
+      return;
+    }
+
+    try {
+      let readPath: string = file.uri;
+      let isTmp = false;
+
+      const stats = await RNBlobUtil.fs.stat(readPath);
+      const size = stats.size;
+      if (!socket.destroyed) {
+        socket.write(
+          `HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename="${encodeURIComponent(fileName)}"\r\nContent-Length: ${size}\r\nConnection: close\r\n\r\n`
+        );
+      }
+      const stream = await RNBlobUtil.fs.readStream(readPath, 'base64', 4096 * 1024);
+      stream.open();
+      stream.onData((chunk: any) => {
+        if (!socket.destroyed) socket.write(typeof chunk === 'string' ? chunk : Buffer.from(chunk), 'base64');
+      });
+      stream.onEnd(() => {
+        if (!socket.destroyed) socket.end();
+        if (isTmp) RNBlobUtil.fs.unlink(readPath).catch(() => {});
+      });
+      stream.onError(() => {
+        if (!socket.destroyed) socket.destroy();
+        if (isTmp) RNBlobUtil.fs.unlink(readPath).catch(() => {});
+      });
+    } catch (e) {
+      if (!socket.destroyed) socket.end('HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n');
     }
   }
 
-  public handleClientConnected(clientAddress: string) {
-    this.report({ type: 'client_connected', clientAddress });
+  // ── Handle V2 handshake POST body ───────────────────────────────────────────
+  private async handleHandshake(socket: any, body: Buffer, remoteIp: string) {
+    const text = body.toString('utf-8');
+    console.log('[V2 Handshake] Body:', text.slice(0, 200));
+    try {
+      JSON.parse(text);
+      this.report({ type: 'client_connected', clientAddress: remoteIp, message: text });
+    } catch (_) {}
+    if (!socket.destroyed) socket.end('HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
   }
 
-  public handleClientDisconnected(clientAddress: string) {
-    this.report({ type: 'client_disconnected', clientAddress });
+  // ── Handle upload from PC browser ───────────────────────────────────────────
+  private async handleUploadChunk(socket: any, req: any, chunk: Buffer, isCont: boolean, isDone: boolean) {
+    const qi = req.path.indexOf('?');
+    const qs = qi >= 0 ? req.path.slice(qi + 1) : '';
+    const params: Record<string, string> = {};
+    qs.split('&').forEach((p: string) => { const eq = p.indexOf('='); if (eq > 0) params[decodeURIComponent(p.slice(0, eq))] = decodeURIComponent(p.slice(eq + 1)); });
+
+    const fileName = params['name'] || 'unknown_file';
+    const fileSize = parseInt(params['size'] || '0', 10);
+    const offset = parseInt(params['offset'] || '0', 10);
+    const isLast = params['last'] === '1';
+
+    const tempPath = `${RNBlobUtil.fs.dirs.CacheDir}/up_${encodeURIComponent(fileName)}`;
+    const finalPath = `${Platform.OS === 'android' ? RNBlobUtil.fs.dirs.DownloadDir : RNBlobUtil.fs.dirs.DocumentDir}/${fileName}`;
+
+    // First chunk — init write stream
+    if (offset === 0 && !isCont) {
+      try { await RNBlobUtil.fs.unlink(tempPath); } catch (_) {}
+      const stream = await RNBlobUtil.fs.writeStream(tempPath, 'base64', false).catch(() => null);
+      this.upload = { active: true, finalized: false, fileName, fileSize, received: 0, tempPath, finalPath, stream, writeQueue: Promise.resolve() };
+    }
+
+    if (chunk.length > 0 && this.upload.stream) {
+      this.upload.received += chunk.length;
+      const snapReceived = this.upload.received;
+      const snapData = chunk.toString('base64');
+      const percent = fileSize > 0 ? Math.min(Math.round((snapReceived / fileSize) * 100), 100) : 0;
+      this.report({ type: 'upload_progress', fileProgress: { name: fileName, percent, sent: snapReceived, total: fileSize } });
+      this.upload.writeQueue = this.upload.writeQueue.then(() => this.upload.stream.write(snapData)).catch(() => {});
+    }
+
+    // ACK only when the entire body for this request is received
+    if (isDone && !socket.destroyed) {
+      const response = 'HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 0\r\nConnection: close\r\n\r\n';
+      socket.write(response, 'utf8', () => {
+        if (!socket.destroyed) socket.end();
+      });
+    }
+
+    // Finalize when last chunk of the ACTUAL FILE is received
+    if ((isLast || (fileSize > 0 && this.upload.received >= fileSize)) && !this.upload.finalized) {
+      if (!isDone) return; // Wait for full body before finalizing file move
+      this.upload.finalized = true;
+      this.upload.active = false;
+      this.upload.writeQueue.then(async () => {
+        if (this.upload.stream) { await this.upload.stream.close(); this.upload.stream = null; }
+        try {
+          if (await RNBlobUtil.fs.exists(finalPath)) await RNBlobUtil.fs.unlink(finalPath);
+          await RNBlobUtil.fs.mv(tempPath, finalPath);
+        } catch (_) {}
+        this.report({ type: 'upload_progress', fileProgress: { name: fileName, percent: 100, sent: fileSize, total: fileSize } });
+        this.report({ type: 'complete', message: `Received ${fileName}` });
+      }).catch(() => {});
+    }
   }
 
-  public updateFiles(files: any[]) {
-    files.forEach(f => {
-      if (!this.filesToSend.find(existing => existing.name === f.name)) {
-        this.filesToSend.push(f);
+  public isRunning() {
+    return this.server !== null;
+  }
+
+  private report(status: any) {
+    if (this.statusCallback) this.statusCallback(status);
+  }
+
+  public updateFiles(newFiles: any[]) {
+    newFiles.forEach(nf => {
+      if (!this.filesToSend.find(f => f.name === nf.name && f.uri === nf.uri)) {
+        this.filesToSend.push(nf);
       }
     });
-    this.report({ type: 'log', message: `Server updated: Total files ${this.filesToSend.length}` });
   }
 
-  stop() {
-    this.server?.close();
-    this.server = null;
-    this.tokens.clear();
+  public stop() {
+    if (this.server) { this.server.close(); this.server = null; }
+    this.activeSockets.forEach(s => { try { s.destroy(); } catch (_) {} });
+    this.activeSockets.clear();
     DiscoveryManager.stopPublishing();
   }
-
-  getPort() {
-    return this.currentPort;
-  }
-  onPeerRegistered(cb?: (ip: string, port: number) => void) { this.peerRegisteredCb = cb; }
-  getPeerInfo() { return { ip: this.peerIp, port: this.peerServerPort }; }
 }
+
 const TransferServerInstance = new TransferServer();
-export const startServer = (port = 8888) => TransferServerInstance.start(port, [], undefined, undefined, 'pc');
-export const stopServer = () => TransferServerInstance.stop();
-export const generateServerUrl = async (): Promise<string> => {
-  try {
-    const DeviceInfo = require('react-native-device-info');
-    const ip = await DeviceInfo.getIpAddress();
-    if (ip && ip !== '0.0.0.0') return `http://${ip}:${TransferServerInstance.getPort()}`;
-  } catch (_) { }
-  return `http://localhost:${TransferServerInstance.getPort()}`;
-};
 export default TransferServerInstance;

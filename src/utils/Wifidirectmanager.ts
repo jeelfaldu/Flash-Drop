@@ -28,6 +28,10 @@ import {
   getAvailablePeers,
   getConnectionInfo,
   getGroupInfo,
+  sendFile,
+  sendFileTo,
+  receiveFile,
+  subscribeOnThisDeviceChanged
 } from 'react-native-wifi-p2p';
 import { PermissionsAndroid, Platform } from 'react-native';
 
@@ -65,6 +69,8 @@ class WiFiDirectManager {
   private peersSubscription: any = null;
   private connectionSubscription: any = null;
   private thisDeviceSubscription: any = null;
+  private transferSubscription: any = null;
+  private thisDevice: WifiP2pDevice | null = null;
   public onStatus?: (status: P2PStatus) => void;
 
   // ── Initialize & Permissions ─────────────────────────────────────────────
@@ -107,6 +113,12 @@ class WiFiDirectManager {
           console.warn('[WiFiDirect] Fine location permission not granted. P2P might fail.');
         }
       }
+
+      this.thisDeviceSubscription?.remove?.();
+      this.thisDeviceSubscription = subscribeOnThisDeviceChanged((device: any) => {
+        console.log('[WiFiDirect] This device updated:', device);
+        this.thisDevice = device;
+      });
 
       this.initialized = true;
       return true;
@@ -299,6 +311,10 @@ class WiFiDirectManager {
 
   // ── Manual connect to specific device ────────────────────────────────────
   async connectToDevice(deviceAddress: string): Promise<string | null> {
+    if (!deviceAddress) {
+      console.error('[WiFiDirect] connectToDevice: deviceAddress is empty!');
+      return null;
+    }
     if (!(await this.init())) return null;
 
     // Clean up any stale/ghost connections before starting a fresh one
@@ -311,7 +327,7 @@ class WiFiDirectManager {
       }
     } catch (_) { }
 
-    return new Promise((resolve) => {
+    return new Promise(async (resolve) => {
       let resolved = false;
       let poll: any = null;
 
@@ -353,20 +369,32 @@ class WiFiDirectManager {
         } catch (_) { }
       }, 3000);
 
-      console.log(`[WiFiDirect] Connecting to ${deviceAddress}...`);
-      connect(deviceAddress)
-        .then(() => {
-          console.log('[WiFiDirect] connect() command sent');
-        })
-        .catch((e: any) => {
-          console.error('[WiFiDirect] connect error:', e.message);
+      console.log(`[WiFiDirect] Connecting to target address: ${deviceAddress}...`);
+
+      const doConnect = async (isRetry = false) => {
+        try {
+          await connect(deviceAddress);
+          console.log(`[WiFiDirect] connect() command sent successfuly${isRetry ? ' (on retry)' : ''}`);
+        } catch (e: any) {
+          console.error(`[WiFiDirect] connect call failed natively${isRetry ? ' AGAIN' : ''}:`, e.message);
+          
+          if (!isRetry && (e.message?.includes('internal error') || e.message?.includes('busy'))) {
+             console.log('[WiFiDirect] Internal error/busy detected. Attempting removeGroup and retry...');
+             try { await removeGroup(); } catch (_) {}
+             await new Promise(r => setTimeout(r, 1000));
+             return doConnect(true);
+          }
+
           this.emit({ type: 'error', message: e.message });
           done(null);
-        });
+        }
+      };
+
+      doConnect();
 
       setTimeout(() => {
         if (!resolved) {
-          console.warn('[WiFiDirect] Connection timed out');
+          console.warn('[WiFiDirect] Connection timed out after 30s');
           this.emit({ type: 'error', message: 'Connection timed out' });
           done(null);
         }
@@ -393,9 +421,11 @@ class WiFiDirectManager {
     this.peersSubscription?.remove?.();
     this.connectionSubscription?.remove?.();
     this.thisDeviceSubscription?.remove?.();
+    this.transferSubscription?.remove?.();
     this.peersSubscription = null;
     this.connectionSubscription = null;
     this.thisDeviceSubscription = null;
+    this.transferSubscription = null;
     this.initialized = false;
     console.log('[WiFiDirect] Stopped');
   }
@@ -417,6 +447,36 @@ class WiFiDirectManager {
       return [];
     }
   }
+
+  getThisDeviceAddress(): string {
+    return this.thisDevice?.deviceAddress || '';
+  }
+
+
+  // ── Native File Transfer (V2) ───────────────────────────────────────────
+  async sendFileP2P(filePath: string, targetIp: string): Promise<boolean> {
+    try {
+      console.log(`[WiFiDirect] Native SendFile: ${filePath} to ${targetIp}`);
+      await sendFileTo(filePath, targetIp);
+      return true;
+    } catch (e: any) {
+      console.error('[WiFiDirect] sendFile error:', e.message || e);
+      return false;
+    }
+  }
+
+  async receiveFileP2P(folder: string, name: string): Promise<string | null> {
+    try {
+      console.log('[WiFiDirect] Native ReceiveFile:', folder, name);
+      const res = await receiveFile(folder, name);
+      return res; // typically returns path of received file
+    } catch (e: any) {
+      console.error('[WiFiDirect] receiveFile error:', e.message);
+      return null;
+    }
+  }
+
+
 
   private emit(status: P2PStatus) {
     this.onStatus?.(status);

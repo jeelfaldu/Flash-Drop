@@ -22,6 +22,7 @@ import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
 import LinearGradient from 'react-native-linear-gradient';
 import DeviceInfo from 'react-native-device-info';
 import WiFiDirectTransferService, { DirectTransferStatus } from '../utils/Wifidirecttransferservice';
+import WiFiDirectTransferServiceV2, { DirectTransferStatusV2 } from '../utils/WiFiDirectTransferServiceV2';
 import ReactNativeBlobUtil from 'react-native-blob-util';
 import { useNavigation } from '@react-navigation/native';
 import { useTheme } from '../theme/ThemeContext';
@@ -42,6 +43,7 @@ interface TransferringFile {
 const ReceiveScreen = ({ route }: any) => {
   const navigation = useNavigation();
   const isConnectMode = route?.params?.mode === 'connect';
+  const isV2Initial = route?.params?.v2 || false;
   const { colors, typography, layout, spacing, isDark } = useTheme();
   const { bottom } = useSafeAreaInsets();
 
@@ -71,7 +73,7 @@ const ReceiveScreen = ({ route }: any) => {
 
   useEffect(() => {
     if (isConnected && ipAddress) {
-      (navigation as any).replace('FileTransfer', {
+      (navigation as any).replace(isV2Initial ? 'FileTransferV2' : 'FileTransfer', {
         role: 'receiver',
         deviceName: ssid || 'Sender',
         initialFiles: []
@@ -101,6 +103,7 @@ const ReceiveScreen = ({ route }: any) => {
 
     const onBackPress = () => {
       WiFiDirectTransferService.stop();
+      WiFiDirectTransferServiceV2.stop();
       if (navigation.canGoBack()) navigation.goBack();
       else (navigation as any).navigate('Home');
       return true;
@@ -132,10 +135,22 @@ const ReceiveScreen = ({ route }: any) => {
             // Force a manual connection to the device address if provided in QR
             if (qr.address) {
               setConnectionStatus('connecting');
-              WiFiDirectTransferService.connectToSpecificDevice(qr.address, getDownloadDir(), qr.key);
+              if (qr.v2) {
+                WiFiDirectTransferServiceV2.connectToSpecificDevice(qr.address);
+              } else {
+                WiFiDirectTransferService.connectToSpecificDevice(qr.address, getDownloadDir(), qr.key);
+              }
             } else {
               // Fallback to general direct connection attempt
-              startDirectConnection(qr.key, qr.name || 'Sender');
+              if (qr.v2) {
+                // For V2, we might just use the IP directly if provided
+                if (qr.ip) {
+                  setupV2Listeners(qr.name || 'Sender');
+                  WiFiDirectTransferServiceV2.finalizeReceiver(qr.ip, getDownloadDir());
+                }
+              } else {
+                startDirectConnection(qr.key, qr.name || 'Sender');
+              }
             }
           } else {
             connectToHotspot(qr.ssid, qr.pass, qr.ip, qr.key);
@@ -223,6 +238,27 @@ const ReceiveScreen = ({ route }: any) => {
 
     };
   };
+
+  const setupV2Listeners = (deviceName: string = 'Sender') => {
+    WiFiDirectTransferServiceV2.onStatus = (status: DirectTransferStatusV2) => {
+      if (status.type === 'ready') {
+        setConnected(true);
+        setConnectionStatus('connected');
+        setConnectionDetails({ type: 'wifi-direct', ssid: 'Direct-FlashDrop-V2', ip: status.ip });
+        setRole('receiver', deviceName);
+        setTransferring(true);
+        HapticUtil.success();
+        setTimeout(() => {
+          (navigation as any).navigate('FileTransferV2', { role: 'receiver', deviceName, initialFiles: [], ip: status.ip });
+        }, 150);
+      }
+      if (status.type === 'error') {
+        setConnectionStatus('error');
+        setConnectionLog(status.message);
+      }
+    };
+  };
+
 
   const startDirectConnection = async (secretKey?: string, deviceName: string = 'Sender') => {
     setConnectionStatus('idle');
