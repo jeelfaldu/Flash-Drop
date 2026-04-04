@@ -157,7 +157,7 @@ const HomeScreen = ({ navigation }: any) => {
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
               {isTransferring && (
                 <TouchableOpacity 
-                   onPress={() => navigation.navigate('FileTransfer')}
+                   onPress={() => navigation.navigate('FileTransferV2')}
                    style={styles.progressHeaderBtn}
                 >
                   <CircularProgress 
@@ -241,7 +241,7 @@ const HomeScreen = ({ navigation }: any) => {
                       Linking.openURL('App-Prefs:root=WIFI');
                     }
                   } else {
-                    navigation.navigate('Receive', { mode: 'connect' });
+                    navigation.navigate('ReceiveV2');
                   }
                 }}
                 activeOpacity={0.7}
@@ -263,40 +263,19 @@ const HomeScreen = ({ navigation }: any) => {
               subtitle="Share Files"
               icon="upload"
               color={colors.primary}
-              onPress={() => navigation.navigate('Send')}
+              onPress={() => navigation.navigate('Send', { v2: true })}
             />
             <DashboardCard
               title="Receive"
               subtitle="Get Files"
               icon="download"
               color={colors.secondary}
-              onPress={() => navigation.navigate('Receive')}
+              onPress={() => navigation.navigate('ReceiveV2')}
             />
           </View>
 
           {!isConnected && (
             <>
-              <View style={styles.sectionLabel}>
-                <Text style={[styles.label, { color: colors.subtext, fontFamily: typography.fontFamily }]}>EXPERIMENTAL (V2)</Text>
-                <View style={[styles.line, { backgroundColor: colors.border }]} />
-              </View>
-
-              <View style={styles.row}>
-                <DashboardCard
-                  title="Send V2"
-                  subtitle="Native P2P"
-                  icon="flash-outline"
-                  color="#FF9F43"
-                  onPress={() => (navigation as any).navigate('Send', { v2: true })}
-                />
-                <DashboardCard
-                  title="Receive V2"
-                  subtitle="Native P2P"
-                  icon="download-outline"
-                  color="#00D1FF"
-                  onPress={() => (navigation as any).navigate('ReceiveV2')}
-                />
-              </View>
 
               <View style={styles.sectionLabel}>
                 <Text style={[styles.label, { color: colors.subtext, fontFamily: typography.fontFamily }]}>QUICK CONNECT</Text>
@@ -306,7 +285,7 @@ const HomeScreen = ({ navigation }: any) => {
               <View style={styles.pairingContainer}>
                 <TouchableOpacity 
                   style={[styles.pairingCard, { backgroundColor: isDark ? '#4A148C' : '#9C27B0' }]} 
-                  onPress={() => { HapticUtil.light(); navigation.navigate('Sharing', { items: [], mode: 'pairing' }); }}
+                  onPress={() => { HapticUtil.light(); navigation.navigate('SharingV2', { items: [] }); }}
                 >
                   <LinearGradient colors={['rgba(255,255,255,0.2)', 'transparent']} style={styles.cardGradient} />
                   <View style={styles.pairingIconBox}>
@@ -318,7 +297,7 @@ const HomeScreen = ({ navigation }: any) => {
 
                 <TouchableOpacity 
                   style={[styles.pairingCard, { backgroundColor: isDark ? '#004D40' : '#009688' }]} 
-                  onPress={() => { HapticUtil.light(); navigation.navigate('Receive', { mode: 'connect' }); }}
+                  onPress={() => { HapticUtil.light(); navigation.navigate('ReceiveV2'); }}
                 >
                   <LinearGradient colors={['rgba(255,255,255,0.2)', 'transparent']} style={styles.cardGradient} />
                   <View style={styles.pairingIconBox}>
@@ -329,20 +308,6 @@ const HomeScreen = ({ navigation }: any) => {
                 </TouchableOpacity>
 
                 <TouchableOpacity 
-                  style={[styles.pairingCard, { backgroundColor: isDark ? '#0D47A1' : '#1976D2', width: '100%', flex: 0 }]} 
-                  onPress={() => { HapticUtil.light(); navigation.navigate('PCConnection'); }}
-                >
-                  <LinearGradient colors={['rgba(255,255,255,0.2)', 'transparent']} style={styles.cardGradient} />
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-                    <Icon name="monitor-share" size={24} color="#FFF" />
-                    <View>
-                      <Text style={[styles.pairingTitle, { fontSize: 16 }]}>PC Share</Text>
-                      <Text style={styles.pairingSub}>Transfer to browser (Classic)</Text>
-                    </View>
-                  </View>
-                </TouchableOpacity>
-
-                <TouchableOpacity 
                   style={[styles.pairingCard, { backgroundColor: isDark ? '#004D61' : '#00838F', width: '100%', flex: 0 }]} 
                   onPress={() => { HapticUtil.light(); navigation.navigate('PCConnectionV2'); }}
                 >
@@ -350,11 +315,8 @@ const HomeScreen = ({ navigation }: any) => {
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
                     <Icon name="monitor-dashboard" size={24} color="#FFF" />
                     <View>
-                      <Text style={[styles.pairingTitle, { fontSize: 16 }]}>PC Share V2</Text>
-                      <Text style={styles.pairingSub}>QR code • new design</Text>
-                    </View>
-                    <View style={{ marginLeft: 'auto', backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: 8, paddingHorizontal: 8, paddingVertical: 3 }}>
-                      <Text style={{ color: '#FFF', fontSize: 10, fontWeight: '800' }}>NEW</Text>
+                      <Text style={[styles.pairingTitle, { fontSize: 16 }]}>PC Sharing</Text>
+                      <Text style={styles.pairingSub}>Transfer files via any browser</Text>
                     </View>
                   </View>
                 </TouchableOpacity>

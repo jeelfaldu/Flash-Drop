@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { Platform } from 'react-native';
 import ReceiveSharingIntent from 'react-native-receive-sharing-intent';
 import { useTransferStore, FileItem, useConnectionStore } from '../store';
-import TransferServer from '../utils/TransferServer';
+import TransferServerV2 from '../utils/TransferServerV2';
 import RNFS from 'react-native-fs';
 import { Buffer } from 'buffer';
 import { navigationRef } from '../../App';
@@ -94,16 +94,16 @@ export const useSharingIntent = () => {
       if (navigationRef.isReady()) {
          setTimeout(() => {
             if (isConnected) {
-              // Replicate SendScreen logic for connected state
-              TransferServer.updateFiles(mappedFiles);
-              (navigationRef as any).navigate('FileTransfer', {
+              // Replicate SendScreen logic for connected state (V2 flow)
+              TransferServerV2.updateFiles(mappedFiles);
+              (navigationRef as any).navigate('FileTransferV2', {
                 role: 'sender',
                 initialFiles: mappedFiles,
                 deviceName: 'Connected Device'
               });
             } else {
-              // Replicate SendScreen logic for non-connected state
-              (navigationRef as any).navigate('Sharing', { 
+              // Replicate SendScreen logic for non-connected state (V2 flow)
+              (navigationRef as any).navigate('SharingV2', { 
                 items: mappedFiles 
               });
             }

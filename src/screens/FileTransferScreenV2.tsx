@@ -227,7 +227,7 @@ const FileTransferScreenV2 = () => {
               <Icon name="arrow-left" size={24} color="#FFF" />
             </TouchableOpacity>
             <View style={{ alignItems: 'center' }}>
-              <Text style={styles.headerTitle}>Native P2P V2</Text>
+              <Text style={styles.headerTitle}>File Transfer</Text>
               <View style={styles.statusChip}>
                 <Text style={styles.statusChipText}>{p2pStatus}</Text>
               </View>

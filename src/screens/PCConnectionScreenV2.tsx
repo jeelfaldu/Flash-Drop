@@ -224,7 +224,7 @@ const PCConnectionScreenV2 = ({ navigation }: any) => {
   };
 
   const handleShare = async () => {
-    try { await Share.share({ message: serverUrl || '', title: 'FlashDrop PC URL V2' }); }
+    try { await Share.share({ message: serverUrl || '', title: 'FlashDrop PC URL' }); }
     catch (_) { Alert.alert('Share', serverUrl || ''); }
   };
 
@@ -254,7 +254,7 @@ const PCConnectionScreenV2 = ({ navigation }: any) => {
               <Icon name="arrow-left" size={22} color="#FFF" />
             </TouchableOpacity>
             <View style={{ flex: 1, marginLeft: 14 }}>
-              <Text style={styles.headerTitle}>PC Share V2</Text>
+              <Text style={styles.headerTitle}>PC Sharing</Text>
               <Text style={styles.headerSub}>Transfer via browser • same WiFi</Text>
             </View>
             {isServerRunning && (

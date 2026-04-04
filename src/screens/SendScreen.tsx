@@ -18,7 +18,7 @@ import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
 import LinearGradient from 'react-native-linear-gradient';
 import { useTheme } from '../theme/ThemeContext';
 import { useTransferStore, useMediaStore, useUIStore, useConnectionStore } from '../store';
-import TransferServer from '../utils/TransferServer';
+import TransferServerV2 from '../utils/TransferServerV2';
 import { BannerAd, BannerAdSize, TestIds } from 'react-native-google-mobile-ads';
 import { DisplayAds, ProdIDs } from '../utils/Constant';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -117,7 +117,7 @@ const SendScreen = ({ navigation, route }: any) => {
     if (isConnected || activeRole) {
       console.log(`[SendScreen] Already in active session (${activeRole || 'connected'}). Routing directly to FileTransfer...`);
       // If already connected or in a session, update server list directly
-      TransferServer.updateFiles(selectedItems);
+      TransferServerV2.updateFiles(selectedItems);
 
       // Manually update store for UI feedback
       setFiles((prev: any) => {
@@ -149,8 +149,8 @@ const SendScreen = ({ navigation, route }: any) => {
         console.log(`[SendScreen] keepConnection=true, returning via goBack()`);
         navigation.goBack();
       } else {
-        console.log(`[SendScreen] Navigating forward to FileTransfer`);
-        navigation.navigate('FileTransfer', {
+        console.log(`[SendScreen] Navigating forward to FileTransferV2`);
+        navigation.navigate('FileTransferV2', {
           role: 'sender',
           initialFiles: selectedItems,
           deviceName: 'Connected Device'

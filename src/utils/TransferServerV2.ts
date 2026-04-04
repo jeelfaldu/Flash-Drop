@@ -28,7 +28,7 @@ const WEB_UI_V2 = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>FlashDrop V2 - PC Transfer</title>
+<title>FlashDrop - PC Transfer</title>
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
 <style>
 *{margin:0;padding:0;box-sizing:border-box;font-family:'Outfit',sans-serif}
@@ -76,7 +76,7 @@ main{flex:1;padding:2rem;max-width:1100px;margin:0 auto;width:100%;display:grid;
 </head>
 <body>
 <header>
-  <div class="logo">⚡ FlashDrop <span style="font-weight:400;font-size:.9rem;opacity:.6;margin-left:.2rem">V2</span></div>
+  <div class="logo">⚡ FlashDrop</div>
   <div class="badge"><span class="dot"></span> <b>Mobile Sync</b></div>
 </header>
 <main>

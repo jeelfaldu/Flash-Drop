@@ -139,7 +139,7 @@ const SharingScreenV2 = ({ route, navigation }: any) => {
             <TouchableOpacity onPress={handleManualGoBack} style={styles.iconButton}>
               <Icon name="arrow-left" size={24} color="#FFF" />
             </TouchableOpacity>
-            <Text style={styles.headerTitle}>Sender V2 (Scanner)</Text>
+            <Text style={styles.headerTitle}>Send</Text>
             <TouchableOpacity onPress={() => setMode(mode === 'radar' ? 'qr' : 'radar')} style={styles.iconButton}>
               <Icon name={mode === 'radar' ? 'qrcode-scan' : 'radar'} size={24} color="#FFF" />
             </TouchableOpacity>
@@ -156,7 +156,7 @@ const SharingScreenV2 = ({ route, navigation }: any) => {
             </View>
 
             <View style={styles.deviceListHeader}>
-                <Text style={styles.deviceListTitle}>Nearby V2 Receivers ({devices.length})</Text>
+                <Text style={styles.deviceListTitle}>Nearby Receivers ({devices.length})</Text>
                 {connectionStatus === 'searching' && <ActivityIndicator size="small" color="#FF9F43" />}
             </View>
 
@@ -192,7 +192,7 @@ const SharingScreenV2 = ({ route, navigation }: any) => {
                 ) : (
                    <Text style={{ color: colors.error, textAlign: 'center' }}>Scanner requires Camera permission</Text>
                 )}
-                <Text style={{ marginTop: 20, color: colors.text, fontWeight: '700' }}>Scan Receiver's V2 QR</Text>
+                <Text style={{ marginTop: 20, color: colors.text, fontWeight: '700' }}>Scan Receiver's QR</Text>
              </View>
           </View>
         )}
