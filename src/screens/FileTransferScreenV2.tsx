@@ -29,7 +29,7 @@ import { useTransferStore, FileItem } from '../store';
 import { useToast } from '../components/Toast';
 import HapticUtil from '../utils/HapticUtil';
 import { FileCardSkeleton } from '../components/SkeletonLoader';
-import { BannerAd, BannerAdSize } from 'react-native-google-mobile-ads';
+import { InterstitialAd, AdEventType, TestIds, BannerAd, BannerAdSize } from 'react-native-google-mobile-ads';
 import { DisplayAds, ProdIDs } from '../utils/Constant';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
@@ -37,6 +37,11 @@ if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental
 }
 
 const { width } = Dimensions.get('window');
+
+const interstitialId = __DEV__ ? TestIds.INTERSTITIAL : ProdIDs.INTERSTITIAL;
+const interstitial = InterstitialAd.createForAdRequest(interstitialId, {
+  requestNonPersonalizedAdsOnly: false,
+});
 
 const FileTransferScreenV2 = () => {
   const navigation = useNavigation();
@@ -77,6 +82,16 @@ const FileTransferScreenV2 = () => {
       // NOTE: Do NOT call stop() here — it would kill a running P2P transfer.
       // stop() is only called explicitly via handleCancel() or on unmount from done state.
     };
+  }, []);
+
+  useEffect(() => {
+    if (!DisplayAds) return;
+    const unsubscribe = interstitial.addAdEventListener(AdEventType.LOADED, () => {
+      interstitial.show();
+    });
+    if (interstitial.loaded) interstitial.show();
+    else interstitial.load();
+    return () => unsubscribe();
   }, []);
 
   useEffect(() => {
@@ -239,6 +254,12 @@ const FileTransferScreenV2 = () => {
         </SafeAreaView>
       </View>
 
+      {DisplayAds && (
+        <View style={styles.adContainerTop}>
+          <BannerAd unitId={ProdIDs.ADAPTIVE_BANNER} size={BannerAdSize.ANCHORED_ADAPTIVE_BANNER} />
+        </View>
+      )}
+
       <FlatList
         data={fileList}
         keyExtractor={(item, index) => item?.id || index.toString()}
@@ -284,7 +305,8 @@ const styles = StyleSheet.create({
   fileName: { fontSize: 15, fontWeight: '700' },
   progressBg: { height: 4, backgroundColor: 'rgba(0,0,0,0.05)', borderRadius: 2, marginTop: 8 },
   progressFill: { height: '100%', borderRadius: 2 },
-  adContainer: { position: 'absolute', bottom: 0, width: '100%', alignItems: 'center' }
+  adContainer: { position: 'absolute', bottom: 0, width: '100%', alignItems: 'center', backgroundColor: 'transparent' },
+  adContainerTop: { width: '100%', alignItems: 'center', marginTop: 10 }
 });
 
 export default FileTransferScreenV2;

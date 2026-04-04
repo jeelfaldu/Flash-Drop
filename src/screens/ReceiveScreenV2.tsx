@@ -22,6 +22,8 @@ import { useTheme } from '../theme/ThemeContext';
 import { useConnectionStore, useTransferStore } from '../store';
 import RadarPulse from '../components/RadarPulse';
 import HapticUtil from '../utils/HapticUtil';
+import { BannerAd, BannerAdSize } from 'react-native-google-mobile-ads';
+import { DisplayAds, ProdIDs } from '../utils/Constant';
 
 const { width } = Dimensions.get('window');
 
@@ -146,7 +148,7 @@ const ReceiveScreenV2 = ({ navigation }: any) => {
             <TouchableOpacity onPress={handleManualGoBack} style={styles.iconButton}>
               <Icon name="arrow-left" size={24} color="#FFF" />
             </TouchableOpacity>
-            <Text style={styles.headerTitle}>Receive V2 (Hotspot)</Text>
+            <Text style={styles.headerTitle}>Receive (Hotspot)</Text>
             <View style={{ width: 40 }} />
           </View>
         </SafeAreaView>
@@ -201,6 +203,12 @@ const ReceiveScreenV2 = ({ navigation }: any) => {
           )}
         </View>
       </View>
+
+      {DisplayAds && (
+        <View style={styles.adContainer}>
+          <BannerAd unitId={ProdIDs.ADAPTIVE_BANNER} size={BannerAdSize.ANCHORED_ADAPTIVE_BANNER} />
+        </View>
+      )}
     </View>
   );
 };
@@ -227,7 +235,8 @@ const styles = StyleSheet.create({
   doneBtnText: { color: '#FFF', fontSize: 15, fontWeight: '700' },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   errorText: { marginTop: 15, color: '#FF4757', textAlign: 'center', fontWeight: '600' },
-  retryBtn: { backgroundColor: '#FF4757', paddingHorizontal: 30, paddingVertical: 12, borderRadius: 12, marginTop: 20 }
+  retryBtn: { backgroundColor: '#FF4757', paddingHorizontal: 30, paddingVertical: 12, borderRadius: 12, marginTop: 20 },
+  adContainer: { position: 'absolute', bottom: 0, width: '100%', alignItems: 'center', backgroundColor: 'transparent' }
 });
 
 export default ReceiveScreenV2;

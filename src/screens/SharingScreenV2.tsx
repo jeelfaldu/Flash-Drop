@@ -22,6 +22,8 @@ import { useTheme } from '../theme/ThemeContext';
 import { useConnectionStore, useTransferStore } from '../store';
 import RadarPulse from '../components/RadarPulse';
 import HapticUtil from '../utils/HapticUtil';
+import { BannerAd, BannerAdSize } from 'react-native-google-mobile-ads';
+import { DisplayAds, ProdIDs } from '../utils/Constant';
 
 const { width } = Dimensions.get('window');
 
@@ -34,6 +36,7 @@ const SharingScreenV2 = ({ route, navigation }: any) => {
   const [devices, setDevices] = useState<any[]>([]);
   const [connectionStatus, setConnectionStatus] = useState<'searching' | 'connecting' | 'error'>('searching');
   const [connectionLog, setConnectionLog] = useState('');
+  const [showRetry, setShowRetry] = useState(false);
 
   const device = useCameraDevice('back');
   const isFinalizing = useRef(false);
@@ -48,6 +51,13 @@ const SharingScreenV2 = ({ route, navigation }: any) => {
     };
     init();
 
+    let retryTimer: any;
+    if (mode === 'radar') {
+      retryTimer = setTimeout(() => {
+        setShowRetry(true);
+      }, 6000);
+    }
+
     const backHandler = BackHandler.addEventListener('hardwareBackPress', () => {
       handleManualGoBack();
       return true;
@@ -55,9 +65,22 @@ const SharingScreenV2 = ({ route, navigation }: any) => {
 
     return () => {
       backHandler.remove();
+      if (retryTimer) clearTimeout(retryTimer);
       // Notice: No automatic stop() here to prevent accidental disconnections on screen replacement.
     };
-  }, []);
+  }, [mode]);
+
+  const handleRetry = async () => {
+    setShowRetry(false);
+    setDevices([]);
+    setConnectionStatus('searching');
+    await WiFiDirectTransferServiceV2.stop();
+    startV2Sender();
+    // Restart timer
+    setTimeout(() => {
+      if (devices.length === 0) setShowRetry(true);
+    }, 6000);
+  };
 
   const handleManualGoBack = () => {
       WiFiDirectTransferServiceV2.stop();
@@ -179,6 +202,24 @@ const SharingScreenV2 = ({ route, navigation }: any) => {
                   <Icon name="chevron-right" size={20} color={colors.subtext} />
                 </TouchableOpacity>
               )}
+              ListEmptyComponent={
+                <View style={{ alignItems: 'center', marginTop: 40 }}>
+                  {!showRetry ? (
+                    <Text style={{ color: colors.subtext }}>Looking for peers...</Text>
+                  ) : (
+                    <View style={{ alignItems: 'center' }}>
+                      <Text style={{ color: colors.subtext, marginBottom: 15 }}>No devices found yet</Text>
+                      <TouchableOpacity 
+                        style={[styles.retryBtn, { backgroundColor: colors.primary }]}
+                        onPress={handleRetry}
+                      >
+                        <Icon name="refresh" size={20} color="#FFF" style={{ marginRight: 8 }} />
+                        <Text style={{ color: '#FFF', fontWeight: '700' }}>Retry Search</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
+                </View>
+              }
             />
           </View>
         ) : (
@@ -204,6 +245,12 @@ const SharingScreenV2 = ({ route, navigation }: any) => {
            <Text style={{ color: '#FFF', marginTop: 20, fontWeight: '700' }}>{connectionLog}</Text>
         </View>
       )}
+
+      {DisplayAds && (
+        <View style={styles.adContainer}>
+          <BannerAd unitId={ProdIDs.ADAPTIVE_BANNER} size={BannerAdSize.ANCHORED_ADAPTIVE_BANNER} />
+        </View>
+      )}
     </View>
   );
 };
@@ -227,7 +274,9 @@ const styles = StyleSheet.create({
   scannerWrapper: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 20 },
   cameraFrame: { width: 250, height: 250, borderRadius: 24, overflow: 'hidden', backgroundColor: '#000', borderWidth: 2, borderColor: '#FF9F43' },
   scanLine: { position: 'absolute', top: '50%', left: 20, right: 20, height: 2, backgroundColor: '#FF9F43' },
-  overlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.8)', justifyContent: 'center', alignItems: 'center', zIndex: 1000 }
+  overlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.8)', justifyContent: 'center', alignItems: 'center', zIndex: 1000 },
+  adContainer: { position: 'absolute', bottom: 0, width: '100%', alignItems: 'center', backgroundColor: 'transparent' },
+  retryBtn: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingVertical: 10, borderRadius: 25, elevation: 5, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.2, shadowRadius: 4 }
 });
 
 export default SharingScreenV2;
