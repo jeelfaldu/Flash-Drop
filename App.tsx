@@ -6,14 +6,10 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import HomeScreen from './src/screens/HomeScreen';
 import SendScreen from './src/screens/SendScreen';
-import ReceiveScreen from './src/screens/ReceiveScreen';
 import ReceiveScreenV2 from './src/screens/ReceiveScreenV2';
 import HistoryScreen from './src/screens/HistoryScreen';
-import SharingScreen from './src/screens/SharingScreen';
 import SharingScreenV2 from './src/screens/SharingScreenV2';
-import FileTransferScreen from './src/screens/FileTransferScreen';
 import FileTransferScreenV2 from './src/screens/FileTransferScreenV2';
-import PCConnectionScreen from './src/screens/PCConnectionScreen';
 import PCConnectionScreenV2 from './src/screens/PCConnectionScreenV2';
 import OnboardingScreen from './src/screens/OnboardingScreen';
 import { requestConnectPermissions } from './src/utils/permissionHelper';
@@ -22,7 +18,6 @@ import { ToastProvider } from './src/components/Toast';
 import { GlobalTransferOverlay } from './src/components/GlobalTransferOverlay';
 import mobileAds, { InterstitialAd, AdEventType, TestIds } from 'react-native-google-mobile-ads';
 import { ProdIDs, DisplayAds } from './src/utils/Constant';
-import TransferManager from './src/utils/TransferManager';
 
 const interstitialAdUnitId = __DEV__ ? TestIds.INTERSTITIAL : ProdIDs.INTERSTITIAL;
 const interstitial = InterstitialAd.createForAdRequest(interstitialAdUnitId, {
@@ -115,14 +110,10 @@ const AppNavigator = () => {
         <Stack.Screen name="Onboarding" component={OnboardingScreen} options={{ animation: 'fade' }} />
         <Stack.Screen name="Home" component={HomeScreen} />
         <Stack.Screen name="Send" component={SendScreen} />
-        <Stack.Screen name="Receive" component={ReceiveScreen} />
         <Stack.Screen name="ReceiveV2" component={ReceiveScreenV2} />
         <Stack.Screen name="History" component={HistoryScreen} />
-        <Stack.Screen name="Sharing" component={SharingScreen} />
         <Stack.Screen name="SharingV2" component={SharingScreenV2} />
-        <Stack.Screen name="FileTransfer" component={FileTransferScreen} />
         <Stack.Screen name="FileTransferV2" component={FileTransferScreenV2} />
-        <Stack.Screen name="PCConnection" component={PCConnectionScreen} />
         <Stack.Screen name="PCConnectionV2" component={PCConnectionScreenV2} />
       </Stack.Navigator>
     </NavigationContainer>
@@ -149,9 +140,6 @@ const App = () => {
       // ── CLEANUP: Force reset stores to wipe out ghost data from older versions ──
       useTransferStore.getState().resetTransfer();
       useConnectionStore.getState().resetConnection();
-
-      // Start global listener for transfer progress
-      TransferManager.initialize();
 
       // Show ad only for returning users
       if (!isReturningUser || !DisplayAds) return;

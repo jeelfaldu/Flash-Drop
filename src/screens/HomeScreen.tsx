@@ -11,6 +11,7 @@ import { BannerAd, BannerAdSize, TestIds } from 'react-native-google-mobile-ads'
 import { DisplayAds, ProdIDs } from '../utils/Constant';
 import HapticUtil from '../utils/HapticUtil';
 import WifiManager from 'react-native-wifi-reborn';
+import WiFiDirectTransferServiceV2 from '../utils/WiFiDirectTransferServiceV2';
 
 const adUnitId = __DEV__ ? TestIds.ADAPTIVE_BANNER : ProdIDs.ADAPTIVE_BANNER;
 
@@ -19,7 +20,7 @@ const { width } = Dimensions.get('window');
 const HomeScreen = ({ navigation }: any) => {
   const { colors, isDark, toggleTheme, typography, layout } = useTheme();
   const { isConnected, ssid, resetConnection } = useConnectionStore();
-  const { isTransferring, transferStats, currentFiles } = useTransferStore();
+  const { resetTransfer, isTransferring, transferStats, currentFiles } = useTransferStore();
   
   const fileCount = Object.keys(currentFiles).length;
   const overallProgress = (transferStats?.overallProgress || 0) * 100;
@@ -73,16 +74,13 @@ const HomeScreen = ({ navigation }: any) => {
   }, []);
 
 
-  const DashboardCard = ({ title, subtitle, icon, color, onPress, size = 'large' }: any) => {
-    // Width calculation: (Useable Width - Gap) / 2
-    // Useable Width = Window Width - Horizontal Padding (24 * 2) = 48
-    // Gap = 16
-    const cardWidth = size === 'large' ? (width - 48 - 16) / 2 : (width - 48);
-    const height = size === 'large' ? 160 : 80;
+  const DashboardCard = ({ title, subtitle, icon, color, onPress, isPrimary = false }: any) => {
+    const cardWidth = (width - 48 - 16) / 2;
+    const height = 180;
 
     return (
       <TouchableOpacity
-        activeOpacity={0.9}
+        activeOpacity={0.85}
         onPress={() => {
           HapticUtil.light();
           if (onPress) onPress();
@@ -92,26 +90,54 @@ const HomeScreen = ({ navigation }: any) => {
           {
             width: cardWidth,
             height: height,
-            backgroundColor: isDark ? colors.surface : colors.surface,
-            borderColor: isDark ? colors.border : '#F0F0F0',
+            backgroundColor: isPrimary ? color : (isDark ? colors.surface : '#FFFFFF'),
+            borderColor: isPrimary ? color : (isDark ? colors.border : '#F0F0F0'),
             borderWidth: 1,
-            ...layout.shadow.medium
+            ...layout.shadow.medium,
+            shadowColor: isPrimary ? color : '#000',
+            shadowOpacity: isPrimary ? 0.3 : 0.1,
           }
         ]}
       >
-        <View style={[styles.cardIconCtx, { backgroundColor: color + '15' }]}>
-          <Icon name={icon} size={size === 'large' ? 32 : 24} color={color} />
-        </View>
-        <View style={styles.cardTextCtx}>
-          <Text style={[styles.cardTitle, { color: colors.text, fontFamily: typography.fontFamily, fontSize: 17 }]}>{title}</Text>
-          <Text style={[styles.cardSubtitle, { color: colors.subtext, fontFamily: typography.fontFamily }]}>{subtitle}</Text>
+        {isPrimary && (
+          <LinearGradient
+            colors={[color, color + 'DF']}
+            style={StyleSheet.absoluteFillObject}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+          />
+        )}
+        <View style={styles.cardHeaderRow}>
+          <View style={[styles.cardIconCtx, { 
+            backgroundColor: isPrimary ? 'rgba(255,255,255,0.25)' : color + '15',
+          }]}>
+            <Icon name={icon} size={30} color={isPrimary ? '#FFF' : color} />
+          </View>
+          <Icon name="arrow-top-right" size={24} color={isPrimary ? 'rgba(255,255,255,0.5)' : colors.subtext} style={{ opacity: 0.5 }} />
         </View>
 
-        {/* Decorative corner */}
-        <View style={[styles.cornerDeco, { backgroundColor: color, opacity: 0.08 }]} />
+        <View style={styles.cardTextCtx}>
+          <Text style={[styles.cardTitle, { 
+            color: isPrimary ? '#FFF' : colors.text, 
+            fontFamily: typography.fontFamily, 
+          }]}>{title}</Text>
+          <Text style={[styles.cardSubtitle, { 
+            color: isPrimary ? 'rgba(255,255,255,0.85)' : colors.subtext, 
+            fontFamily: typography.fontFamily 
+          }]}>{subtitle}</Text>
+        </View>
+
+        {/* Decorative huge icon in background */}
+        <Icon 
+          name={icon} 
+          size={110} 
+          color={isPrimary ? '#FFF' : color} 
+          style={[styles.bgHugeIcon, { opacity: isPrimary ? 0.15 : 0.04 }]} 
+        />
       </TouchableOpacity>
     );
   };
+
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
@@ -125,11 +151,11 @@ const HomeScreen = ({ navigation }: any) => {
           colors={colors.gradient}
           style={styles.headerGradient}
           start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
+          end={{ x: 1, y: 1.2 }}
         />
         <SafeAreaView>
           <View style={styles.headerContent}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
               {/* ⚡ Animated Lightning Bolt */}
               <Animated.View
                 style={{
@@ -144,9 +170,12 @@ const HomeScreen = ({ navigation }: any) => {
                   ],
                 }}
               >
-                <View style={styles.boltContainer}>
+                <LinearGradient
+                  colors={['rgba(255,255,255,0.3)', 'rgba(255,255,255,0.1)']}
+                  style={styles.boltContainer}
+                >
                   <Text style={styles.boltEmoji}>⚡</Text>
-                </View>
+                </LinearGradient>
               </Animated.View>
               <View>
                 <Text style={[styles.headerTitle, { fontFamily: typography.fontFamily }]}>FlashDrop</Text>
@@ -154,7 +183,7 @@ const HomeScreen = ({ navigation }: any) => {
               </View>
             </View>
 
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
               {isTransferring && (
                 <TouchableOpacity 
                    onPress={() => navigation.navigate('FileTransferV2')}
@@ -170,7 +199,7 @@ const HomeScreen = ({ navigation }: any) => {
                 </TouchableOpacity>
               )}
               <TouchableOpacity onPress={() => { HapticUtil.light(); toggleTheme(); }} style={styles.iconButton}>
-                <Icon name={isDark ? "weather-sunny" : "weather-night"} size={20} color="#FFF" />
+                <Icon name={isDark ? "weather-sunny" : "weather-night"} size={22} color="#FFF" />
               </TouchableOpacity>
             </View>
           </View>
@@ -179,56 +208,60 @@ const HomeScreen = ({ navigation }: any) => {
 
       <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
 
-        {/* Connection Status Banner */}
+        {/* Connection Status Pill */}
         {isConnected ? (
           <Animated.View style={[
-            styles.statusBanner,
+            styles.statusPill,
             {
-              backgroundColor: isDark ? 'rgba(76, 175, 80, 0.1)' : '#F1F8E9',
-              borderColor: isDark ? 'rgba(76, 175, 80, 0.2)' : '#DCEDC8',
-              borderWidth: 1,
+              backgroundColor: isDark ? 'rgba(76, 175, 80, 0.15)' : '#E8F5E9',
+              borderColor: isDark ? 'rgba(76, 175, 80, 0.4)' : '#C8E6C9',
               opacity: fadeAnim
             }
           ]}>
             <View style={styles.statusContent}>
-              <View style={[styles.statusIconContainer, { backgroundColor: isDark ? 'rgba(76, 175, 80, 0.2)' : '#C8E6C9' }]}>
-                <Icon name="wifi-strength-4" size={20} color={isDark ? '#81C784' : '#2E7D32'} />
+              <View style={[styles.statusIconCircle, { backgroundColor: isDark ? 'rgba(76, 175, 80, 0.25)' : '#A5D6A7' }]}>
+                <Icon name="wifi-strength-4" size={18} color={isDark ? '#81C784' : '#2E7D32'} />
               </View>
               <View style={{ marginLeft: 12, flex: 1 }}>
-                <Text style={[styles.statusTitle, { color: isDark ? '#A5D6A7' : '#1B5E20', fontFamily: typography.fontFamily }]} numberOfLines={1}>
-                  {ssid || 'Connected'}
+                <Text style={[styles.statusTitlePill, { color: isDark ? '#A5D6A7' : '#1B5E20', fontFamily: typography.fontFamily }]} numberOfLines={1}>
+                  {ssid || 'Connected to Peer'}
                 </Text>
-                <Text style={[styles.statusSub, { color: isDark ? '#81C784' : '#388E3C', fontFamily: typography.fontFamily }]}>
-                  Ready to transfer
+                <Text style={[styles.statusSubPill, { color: isDark ? '#81C784' : '#388E3C', fontFamily: typography.fontFamily }]}>
+                  Ready to transfer files
                 </Text>
               </View>
-              <TouchableOpacity onPress={() => { HapticUtil.light(); resetConnection(); }} activeOpacity={0.7} style={[styles.disconnectBtn, { backgroundColor: isDark ? 'rgba(244, 67, 54, 0.15)' : '#FFEBEE' }]}>
-                <Text style={[styles.disconnectText, { color: isDark ? '#EF5350' : '#D32F2F', fontFamily: typography.fontFamily }]}>Disconnect</Text>
+              <TouchableOpacity onPress={() => { 
+                HapticUtil.light();
+                // Hard disconnect: tears down P2P group
+                WiFiDirectTransferServiceV2.disconnect();
+                resetTransfer();
+                resetConnection();
+              }} activeOpacity={0.7} style={[styles.disconnectPillBtn, { backgroundColor: isDark ? 'rgba(244, 67, 54, 0.2)' : '#FFCDD2' }]}>
+                <Text style={[styles.disconnectText, { color: isDark ? '#EF5350' : '#C62828', fontFamily: typography.fontFamily }]}>Disconnect</Text>
               </TouchableOpacity>
             </View>
           </Animated.View>
         ) : (
           <Animated.View
             style={[
-              styles.statusBanner,
+              styles.statusPill,
               {
-                backgroundColor: isDark ? 'rgba(52, 152, 219, 0.08)' : '#E3F2FD',
-                borderColor: isDark ? 'rgba(52, 152, 219, 0.25)' : '#BBDEFB',
-                borderWidth: 1,
+                backgroundColor: isDark ? 'rgba(52, 152, 219, 0.12)' : '#E3F2FD',
+                borderColor: isDark ? 'rgba(52, 152, 219, 0.3)' : '#BBDEFB',
                 opacity: fadeAnim,
               }
             ]}
           >
             <View style={styles.statusContent}>
-              <View style={[styles.statusIconContainer, { backgroundColor: isDark ? 'rgba(52,152,219,0.2)' : '#90CAF9' }]}>
-                <Icon name="link-variant-off" size={20} color={isDark ? '#64B5F6' : '#1565C0'} />
+              <View style={[styles.statusIconCircle, { backgroundColor: isDark ? 'rgba(52,152,219,0.25)' : '#90CAF9' }]}>
+                <Icon name="link-variant-off" size={18} color={isDark ? '#64B5F6' : '#1565C0'} />
               </View>
               <View style={{ marginLeft: 12, flex: 1 }}>
-                <Text style={[styles.statusTitle, { color: isDark ? '#90CAF9' : '#0D47A1', fontFamily: typography.fontFamily }]}>
+                <Text style={[styles.statusTitlePill, { color: isDark ? '#90CAF9' : '#0D47A1', fontFamily: typography.fontFamily }]}>
                   Device not paired
                 </Text>
-                <Text style={[styles.statusSub, { color: isDark ? '#64B5F6' : '#1976D2', fontFamily: typography.fontFamily }]}>
-                  {wifiEnabled ? 'WiFi is enabled' : 'Use QR code for instant pairing'}
+                <Text style={[styles.statusSubPill, { color: isDark ? '#64B5F6' : '#1976D2', fontFamily: typography.fontFamily }]}>
+                  {wifiEnabled ? 'Ready for connection' : 'WiFi is turned off'}
                 </Text>
               </View>
               <TouchableOpacity
@@ -245,9 +278,9 @@ const HomeScreen = ({ navigation }: any) => {
                   }
                 }}
                 activeOpacity={0.7}
-                style={[styles.disconnectBtn, { backgroundColor: isDark ? 'rgba(52,152,219,0.15)' : '#BBDEFB' }]}
+                style={[styles.disconnectPillBtn, { backgroundColor: isDark ? 'rgba(52,152,219,0.25)' : '#90CAF9' }]}
               >
-                <Text style={[styles.disconnectText, { color: isDark ? '#90CAF9' : '#0D47A1', fontFamily: typography.fontFamily }]}>
+                <Text style={[styles.disconnectText, { color: isDark ? '#E3F2FD' : '#0D47A1', fontFamily: typography.fontFamily }]}>
                   {wifiEnabled ? 'Connect' : 'WiFi'}
                 </Text>
               </TouchableOpacity>
@@ -260,71 +293,52 @@ const HomeScreen = ({ navigation }: any) => {
           <View style={styles.row}>
             <DashboardCard
               title="Send"
-              subtitle="Share Files"
+              subtitle="Share files quickly"
               icon="upload"
               color={colors.primary}
+              isPrimary={true}
               onPress={() => navigation.navigate('Send', { v2: true })}
             />
             <DashboardCard
               title="Receive"
-              subtitle="Get Files"
+              subtitle="Get files securely"
               icon="download"
               color={colors.secondary}
+              isPrimary={false}
               onPress={() => navigation.navigate('ReceiveV2')}
             />
           </View>
 
           {!isConnected && (
             <>
-
-              <View style={styles.sectionLabel}>
-                <Text style={[styles.label, { color: colors.subtext, fontFamily: typography.fontFamily }]}>QUICK CONNECT</Text>
-                <View style={[styles.line, { backgroundColor: colors.border }]} />
+              <View style={styles.sectionHeader}>
+                <Text style={[styles.sectionHeading, { color: colors.text, fontFamily: typography.fontFamily }]}>Quick Connect</Text>
+                <View style={[styles.sectionDivider, { backgroundColor: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.06)' }]} />
               </View>
 
-              <View style={styles.pairingContainer}>
-                <TouchableOpacity 
-                  style={[styles.pairingCard, { backgroundColor: isDark ? '#4A148C' : '#9C27B0' }]} 
-                  onPress={() => { HapticUtil.light(); navigation.navigate('SharingV2', { items: [] }); }}
+              <TouchableOpacity
+                style={[styles.pcShareRow, { backgroundColor: isDark ? colors.surface : '#FFFFFF', borderColor: isDark ? 'rgba(255,255,255,0.05)' : '#F0F0F0' }]}
+                onPress={() => { HapticUtil.light(); navigation.navigate('PCConnectionV2'); }}
+                activeOpacity={0.8}
+              >
+                <LinearGradient
+                  colors={['#009688', '#00796B']}
+                  style={styles.pcShareIconBox}
                 >
-                  <LinearGradient colors={['rgba(255,255,255,0.2)', 'transparent']} style={styles.cardGradient} />
-                  <View style={styles.pairingIconBox}>
-                    <Icon name="qrcode" size={32} color="#FFF" />
-                  </View>
-                  <Text style={styles.pairingTitle}>Show QR</Text>
-                  <Text style={styles.pairingSub}>Receive pairing</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity 
-                  style={[styles.pairingCard, { backgroundColor: isDark ? '#004D40' : '#009688' }]} 
-                  onPress={() => { HapticUtil.light(); navigation.navigate('ReceiveV2'); }}
-                >
-                  <LinearGradient colors={['rgba(255,255,255,0.2)', 'transparent']} style={styles.cardGradient} />
-                  <View style={styles.pairingIconBox}>
-                    <Icon name="qrcode-scan" size={32} color="#FFF" />
-                  </View>
-                  <Text style={styles.pairingTitle}>Scan QR</Text>
-                  <Text style={styles.pairingSub}>Join device</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity 
-                  style={[styles.pairingCard, { backgroundColor: isDark ? '#004D61' : '#00838F', width: '100%', flex: 0 }]} 
-                  onPress={() => { HapticUtil.light(); navigation.navigate('PCConnectionV2'); }}
-                >
-                  <LinearGradient colors={['rgba(255,255,255,0.22)', 'transparent']} style={styles.cardGradient} />
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-                    <Icon name="monitor-dashboard" size={24} color="#FFF" />
-                    <View>
-                      <Text style={[styles.pairingTitle, { fontSize: 16 }]}>PC Sharing</Text>
-                      <Text style={styles.pairingSub}>Transfer files via any browser</Text>
-                    </View>
-                  </View>
-                </TouchableOpacity>
-              </View>
+                  <Icon name="monitor-cellphone" size={28} color="#FFF" />
+                </LinearGradient>
+                <View style={styles.pcShareTextWrap}>
+                  <Text style={[styles.pcShareTitle, { color: colors.text, fontFamily: typography.fontFamily }]}>PC Share</Text>
+                  <Text style={[styles.pcShareSub, { color: colors.subtext, fontFamily: typography.fontFamily }]}>Connect from any web browser</Text>
+                </View>
+                <View style={[styles.pcShareChevron, { backgroundColor: isDark ? 'rgba(255,255,255,0.08)' : '#F5F5F5' }]}>
+                  <Icon name="arrow-right" size={20} color={isDark ? '#FFF' : '#455A64'} />
+                </View>
+              </TouchableOpacity>
             </>
           )}
 
-          <View style={{ alignItems: 'center', marginTop: 24 }}>
+          <View style={{ alignItems: 'center', marginTop: 30 }}>
             {DisplayAds && (
               <BannerAd
                 unitId={adUnitId}
@@ -338,24 +352,30 @@ const HomeScreen = ({ navigation }: any) => {
 
           <View style={styles.listContainer}>
             <TouchableOpacity
-              style={[styles.listItem, { backgroundColor: isDark ? colors.surface : '#FFF' }]}
+              style={[styles.historyRow, { backgroundColor: isDark ? colors.surface : '#FFFFFF' }]}
               onPress={() => { HapticUtil.light(); navigation.navigate('History'); }}
+              activeOpacity={0.8}
             >
-              <View style={[styles.listIcon, { backgroundColor: '#E0E0E0' }]}>
-                <Icon name="history" size={22} color="#616161" />
+              <LinearGradient 
+                colors={isDark ? ['#333', '#222'] : ['#F5F7FA', '#E8ECF1']} 
+                style={styles.historyIconWrap}
+              >
+                <Icon name="history" size={24} color={isDark ? '#E0E0E0' : '#455A64'} />
+              </LinearGradient>
+              <View style={{ flex: 1, paddingHorizontal: 16 }}>
+                <Text style={[styles.historyTitle, { color: colors.text, fontFamily: typography.fontFamily }]}>Transfer History</Text>
+                <Text style={[styles.historySub, { color: colors.subtext, fontFamily: typography.fontFamily }]}>View past sent & received files</Text>
               </View>
-              <View style={{ flex: 1, paddingHorizontal: 12 }}>
-                <Text style={[styles.listTitle, { color: colors.text }]}>Transfer History</Text>
-                <Text style={{ fontSize: 12, color: colors.subtext }}>View past activity</Text>
+              <View style={[styles.chevronWrap, { backgroundColor: isDark ? 'rgba(255,255,255,0.05)' : '#F5F5F5' }]}>
+                <Icon name="chevron-right" size={20} color={colors.subtext} />
               </View>
-              <Icon name="chevron-right" size={20} color={colors.subtext} />
             </TouchableOpacity>
           </View>
 
           {/* Made with love in Bharat */}
-          <View style={{ alignItems: 'center', marginTop: 32, marginBottom: 10 }}>
-            <Text style={{ fontSize: 13, color: colors.subtext, fontFamily: typography.fontFamily, fontWeight: '500', opacity: 0.8 }}>
-              Made with ❤️ in Bharat
+          <View style={{ alignItems: 'center', marginTop: 40, marginBottom: 20 }}>
+            <Text style={{ fontSize: 13, color: colors.subtext, fontFamily: typography.fontFamily, fontWeight: '500', opacity: 0.6, letterSpacing: 0.5 }}>
+              MADE WITH ❤️ IN BHARAT
             </Text>
           </View>
 
@@ -373,238 +393,244 @@ const styles = StyleSheet.create({
   headerWrapper: {
     backgroundColor: 'transparent',
     zIndex: 10,
-    paddingBottom: 20
+    paddingBottom: 20,
   },
   headerGradient: {
     ...StyleSheet.absoluteFillObject,
-    borderBottomLeftRadius: 24,
-    borderBottomRightRadius: 24,
+    borderBottomLeftRadius: 36,
+    borderBottomRightRadius: 36,
   },
   headerContent: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 24,
-    paddingTop: Platform.OS === 'android' ? 50 : 20,
-    paddingBottom: 15,
+    paddingTop: Platform.OS === 'android' ? 56 : 24,
+    paddingBottom: 20,
   },
   headerTitle: {
-    fontSize: 28,
+    fontSize: 26,
     fontWeight: '800',
     color: '#FFF',
-    letterSpacing: -0.5
+    letterSpacing: -0.5,
   },
   headerSubtitle: {
     fontSize: 13,
     fontWeight: '500',
-    color: 'rgba(255,255,255,0.7)',
+    color: 'rgba(255,255,255,0.85)',
+    letterSpacing: 0.2,
   },
   iconButton: {
-    width: 40,
-    height: 40,
+    width: 44,
+    height: 44,
     justifyContent: 'center',
     alignItems: 'center',
-    borderRadius: 20,
+    borderRadius: 22,
     backgroundColor: 'rgba(255,255,255,0.15)',
   },
   progressHeaderBtn: {
     padding: 2,
-    borderRadius: 20,
-    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 22,
+    backgroundColor: 'rgba(255,255,255,0.15)',
   },
   boltContainer: {
-    width: 44,
-    height: 44,
-    borderRadius: 14,
-    backgroundColor: 'rgba(255,255,255,0.18)',
+    width: 48,
+    height: 48,
+    borderRadius: 16,
     alignItems: 'center',
     justifyContent: 'center',
-    borderWidth: 1.5,
-    borderColor: 'rgba(255,255,255,0.35)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.4)',
   },
   boltEmoji: {
-    fontSize: 22,
+    fontSize: 24,
   },
   scrollContent: {
     paddingBottom: 40,
-    paddingHorizontal: 24
+    paddingHorizontal: 24,
   },
-  statusBanner: {
-    borderRadius: 20,
-    padding: 16,
-    marginVertical: 12,
+  statusPill: {
+    borderRadius: 100,
+    padding: 8,
+    paddingRight: 12,
+    marginVertical: 16,
     marginBottom: 0,
+    borderWidth: 1,
   },
   statusContent: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between'
   },
-  statusIconContainer: {
+  statusIconCircle: {
     width: 40,
     height: 40,
     borderRadius: 20,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  statusTitle: {
+  statusTitlePill: {
     fontSize: 15,
     fontWeight: '700',
-    marginBottom: 2,
+    marginBottom: 1,
   },
-  statusSub: {
-    fontSize: 13,
-    fontWeight: '500',
+  statusSubPill: {
+    fontSize: 12,
+    fontWeight: '600',
+    opacity: 0.9,
   },
-  disconnectBtn: {
+  disconnectPillBtn: {
     paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 20,
-    marginLeft: 12,
+    paddingVertical: 10,
+    borderRadius: 30,
+    marginLeft: 8,
   },
   disconnectText: {
     fontSize: 13,
     fontWeight: '700',
   },
-  avatar: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    alignItems: 'center',
-    justifyContent: 'center'
-  },
-  welcomeText: {
-    fontSize: 18,
-    fontWeight: '700'
-  },
   gridContainer: {
-    gap: 16,
-    marginTop: 24
+    gap: 20,
+    marginTop: 24,
   },
   row: {
     flexDirection: 'row',
     justifyContent: 'space-between',
   },
   dashboardCard: {
-    borderRadius: 24,
+    borderRadius: 28,
     padding: 20,
     justifyContent: 'space-between',
+    overflow: 'hidden',
     position: 'relative',
-    overflow: 'hidden'
+  },
+  cardHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
   },
   cardIconCtx: {
     width: 56,
     height: 56,
-    borderRadius: 18,
+    borderRadius: 20,
     alignItems: 'center',
-    justifyContent: 'center'
+    justifyContent: 'center',
   },
   cardTextCtx: {
-
+    marginTop: 'auto',
   },
   cardTitle: {
-    fontWeight: '700',
-    marginBottom: 4
+    fontWeight: '800',
+    fontSize: 24,
+    marginBottom: 4,
+    letterSpacing: -0.5,
   },
   cardSubtitle: {
-    fontSize: 12,
+    fontSize: 13,
+    fontWeight: '500',
   },
-  cornerDeco: {
+  bgHugeIcon: {
     position: 'absolute',
-    right: -20,
-    top: -20,
-    width: 80,
-    height: 80,
-    borderRadius: 40
+    right: -25,
+    bottom: -20,
+    transform: [{ rotate: '-10deg' }],
   },
-  pairingContainer: {
+  sectionHeader: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 12,
-  },
-  pairingCard: {
-    flex: 1,
-    minWidth: '45%',
-    height: 120,
-    borderRadius: 24,
-    padding: 16,
-    justifyContent: 'center',
     alignItems: 'center',
-    position: 'relative',
-    overflow: 'hidden',
+    marginTop: 10,
+    marginBottom: 4,
   },
-  cardGradient: {
-    ...StyleSheet.absoluteFillObject,
-  },
-  pairingIconBox: {
-    width: 48,
-    height: 48,
-    borderRadius: 16,
-    backgroundColor: 'rgba(255,255,255,0.2)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 8,
-  },
-  pairingTitle: {
-    color: '#FFF',
-    fontSize: 16,
+  sectionHeading: {
+    fontSize: 18,
     fontWeight: '800',
+    letterSpacing: -0.3,
   },
-  pairingSub: {
-    color: 'rgba(255,255,255,0.7)',
-    fontSize: 11,
-    fontWeight: '600',
+  sectionDivider: {
+    flex: 1,
+    height: 1,
+    marginLeft: 16,
   },
-  sectionLabel: {
+  pcShareRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 8,
-    marginVertical: 8
+    padding: 16,
+    borderRadius: 24,
+    borderWidth: 1,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.05,
+    shadowRadius: 10,
+    elevation: 3,
   },
-  label: {
-    fontSize: 12,
-    fontWeight: '700',
-    letterSpacing: 1,
-    marginRight: 12
+  pcShareIconBox: {
+    width: 54,
+    height: 54,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  line: {
+  pcShareTextWrap: {
     flex: 1,
-    height: 1
+    paddingHorizontal: 16,
+  },
+  pcShareTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    letterSpacing: -0.3,
+    marginBottom: 4,
+  },
+  pcShareSub: {
+    fontSize: 13,
+    fontWeight: '500',
+  },
+  pcShareChevron: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   listContainer: {
-    marginTop: 24
+    marginTop: 20,
   },
-  listItem: {
+  historyRow: {
     flexDirection: 'row',
     alignItems: 'center',
     padding: 16,
-    borderRadius: 20,
+    borderRadius: 24,
     borderWidth: 1,
-    borderColor: 'rgba(0,0,0,0.05)'
+    borderColor: 'transparent', // Inherits shadow for depth or handled by parent
+    elevation: 3,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 6,
   },
-  listIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 12,
+  historyIconWrap: {
+    width: 50,
+    height: 50,
+    borderRadius: 16,
     alignItems: 'center',
-    justifyContent: 'center'
+    justifyContent: 'center',
   },
-  listTitle: {
-    fontSize: 15,
-    fontWeight: '600',
-    marginBottom: 2
+  historyTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    marginBottom: 2,
   },
-  badge: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    backgroundColor: '#E3F2FD',
-    borderRadius: 6
+  historySub: {
+    fontSize: 13,
+    fontWeight: '500',
+    opacity: 0.7,
   },
-  badgeText: {
-    fontSize: 10,
-    fontWeight: '800',
-    color: '#1976D2'
-  }
+  chevronWrap: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
 });
 
 export default HomeScreen;

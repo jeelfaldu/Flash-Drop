@@ -3,6 +3,7 @@ import RNBlobUtil from 'react-native-blob-util';
 import { Platform } from 'react-native';
 import DiscoveryManager from './DiscoveryManager';
 import { Buffer } from 'buffer';
+import RNFS from 'react-native-fs';
 
 /**
  * TransferServerV2.ts
@@ -114,14 +115,22 @@ main{flex:1;padding:2rem;max-width:1100px;margin:0 auto;width:100%;display:grid;
   function startFiles(files){for(var i=0;i<files.length;i++){q.push(files[i]);addUI(files[i].name,files[i].size);}if(!busy)pump();}
   async function pump(){if(!q.length){busy=false;return;}busy=true;await send(q.shift());pump();}
   async function send(f){
-    var tot=f.size,off=0,CH=4*1024*1024,id=rid(f.name);
-    while(off<tot){
-      var end=Math.min(off+CH,tot),last=(end>=tot)?1:0,blob=f.slice(off,end);
-      var url='/api/upload?name='+encodeURIComponent(f.name)+'&size='+tot+'&offset='+off+'&last='+last;
-      var ok=await fetch(url,{method:'POST',body:blob}).then(r=>r.ok).catch(()=>false);
-      if(!ok){setErr(id);return;}
-      off=end;setPct(id,last?100:Math.floor(off/tot*100),off,tot);
-    }
+    var tot=f.size,off=0,CH=8*1024*1024,id=rid(f.name),active=0,limit=2,done=false;
+    return new Promise(resolve=>{
+      async function next(){
+        if(off>=tot){if(active===0&&!done){done=true;resolve();}return;}
+        if(active>=limit)return;
+        var start=off;off+=CH;active++;
+        var end=Math.min(start+CH,tot),last=(end>=tot)?1:0,blob=f.slice(start,end);
+        var url='/api/upload?name='+encodeURIComponent(f.name)+'&size='+tot+'&offset='+start+'&last='+last;
+        var ok=await fetch(url,{method:'POST',body:blob}).then(r=>r.ok).catch(()=>false);
+        active--;
+        if(!ok){done=true;setErr(id);resolve();return;}
+        setPct(id,Math.min(99,Math.floor(end/tot*100)),end,tot);
+        next();next();
+      }
+      next();next();
+    });
   }
   function addUI(n,s){var id=rid(n);if(document.getElementById(id))return;var d=document.createElement('div');d.id=id;d.className='up-item';d.innerHTML='<div class="up-info"><div class="file-meta"><div class="file-name" title="'+esc(n)+'">'+esc(n)+'</div><div class="file-size" id="'+id+'_m">Preparing...</div></div><div id="'+id+'_p" style="font-weight:900;font-size:.9rem;color:var(--p)">0%</div></div><div class="up-prog"><div class="up-fill" id="'+id+'_f"></div></div>';pl.prepend(d);}
   function setPct(id,p,s,t){var f=document.getElementById(id+'_f'),pk=document.getElementById(id+'_p'),m=document.getElementById(id+'_m');if(f)f.style.width=p+'%';if(p>=100)f.classList.add('done');if(pk)pk.textContent=p>=100?'DONE':p+'%';if(m)m.textContent=fmt(s)+' / '+fmt(t);}
@@ -141,7 +150,7 @@ class TransferServerV2 {
   public onStatus: ((status: ServerStatusV2) => void) | null = null;
   private files: any[] = [];
   private sockets: Map<string, any> = new Map();
-  private upload: any = { active: false, name: '', received: 0, stream: null, queue: Promise.resolve() };
+  private upload: any = { active: false, name: '', received: 0, lastEmit: 0, queue: Promise.resolve() };
 
   public start(port: number, sharedFiles: any[] = []) {
     if (this.server) {
@@ -255,7 +264,7 @@ class TransferServerV2 {
       const stat = await RNBlobUtil.fs.stat(uri);
       socket.write(`HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename="${encodeURIComponent(name)}"\r\nContent-Length: ${stat.size}\r\nConnection: close\r\n\r\n`);
       
-      const stream = await RNBlobUtil.fs.readStream(uri, 'base64', 1024 * 1024);
+      const stream = await RNBlobUtil.fs.readStream(uri, 'base64', 2 * 1024 * 1024);
       stream.onData((chunk) => { 
         if (!socket.destroyed) socket.write(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('base64'), 'base64');
       });
@@ -281,28 +290,50 @@ class TransferServerV2 {
     const temp = `${RNBlobUtil.fs.dirs.CacheDir}/pc_up_${encodeURIComponent(name)}`;
     const dest = `${Platform.OS === 'android' ? RNBlobUtil.fs.dirs.DownloadDir : RNBlobUtil.fs.dirs.DocumentDir}/${name}`;
 
-    if (offset === 0 && !isCont) {
-      try { await RNBlobUtil.fs.unlink(temp); } catch(_) {}
-      const s = await RNBlobUtil.fs.writeStream(temp, 'base64', false);
-      this.upload = { active: true, name, total, received: 0, stream: s, queue: Promise.resolve() };
+    // Initialize transfer session if this is a new file or we just started
+    if (!this.upload.active || this.upload.name !== name) {
+      this.upload = { ...this.upload, active: true, name, total, received: 0, lastEmit: 0, queue: Promise.resolve() };
+      try { 
+        if (await RNFS.exists(temp)) await RNFS.unlink(temp); 
+        await RNFS.writeFile(temp, '', 'base64');
+      } catch(_) {}
     }
 
-    if (chunk.length > 0 && this.upload.stream) {
-      this.upload.received += chunk.length;
+    if (chunk.length > 0) {
       const data = chunk.toString('base64');
-      this.upload.queue = this.upload.queue.then(() => this.upload.stream.write(data));
-      this.emit({ type: 'upload_progress', fileProgress: { name, percent: Math.round(this.upload.received/total*100), sent: this.upload.received, total } });
+      // Increment total received but use specific offset for writing
+      this.upload.received += chunk.length;
+      
+      // Parallel random-access write
+      this.upload.queue = this.upload.queue.then(() => 
+        RNFS.write(temp, data, offset, 'base64')
+      );
+
+      // Bridge throttling: only emit every 300ms
+      const now = Date.now();
+      if (now - this.upload.lastEmit > 300 || isLast) {
+        this.upload.lastEmit = now;
+        this.emit({ 
+          type: 'upload_progress', 
+          fileProgress: { 
+            name, 
+            percent: Math.round(this.upload.received / total * 100), 
+            sent: this.upload.received, 
+            total 
+          } 
+        });
+      }
     }
 
     if (isDone) {
       socket.end('HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\n\r\n');
-      if (isLast || (total > 0 && offset + chunk.length >= total)) {
+      if (isLast || (total > 0 && this.upload.received >= total)) {
         this.upload.queue.then(async () => {
-          if (this.upload.stream) { await this.upload.stream.close(); this.upload.stream = null; }
           try {
             if (await RNBlobUtil.fs.exists(dest)) await RNBlobUtil.fs.unlink(dest);
             await RNBlobUtil.fs.mv(temp, dest);
           } catch(_) {}
+          this.emit({ type: 'upload_progress', fileProgress: { name, percent: 100, sent: total, total } });
           this.emit({ type: 'complete', message: `Received ${name}` });
         }).catch(() => {});
       }

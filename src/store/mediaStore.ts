@@ -15,7 +15,9 @@ interface MediaState {
   apps: any[];
 
   isLoading: boolean;
-  hasLoaded: boolean; // skip re-fetch if already loaded
+  hasLoadedMedia: boolean;
+  hasLoadedContacts: boolean;
+  hasLoadedFiles: boolean;
   error: string | null;
 
   // Raw setters
@@ -46,7 +48,9 @@ export const useMediaStore = create<MediaState>((set, get) => ({
   contacts: [],
   apps: [],
   isLoading: false,
-  hasLoaded: false,
+  hasLoadedMedia: false,
+  hasLoadedContacts: false,
+  hasLoadedFiles: false,
   error: null,
 
   // ── Raw setters ────────────────────────────────────────────────────────────
@@ -72,13 +76,17 @@ export const useMediaStore = create<MediaState>((set, get) => ({
       contacts: [],
       apps: [],
       isLoading: false,
-      hasLoaded: false,
+      hasLoadedMedia: false,
+      hasLoadedContacts: false,
+      hasLoadedFiles: false,
       error: null,
     }),
 
   // ── Async actions ──────────────────────────────────────────────────────────
 
   loadContacts: async () => {
+    if (get().hasLoadedContacts) return;
+    set({ isLoading: true });
     try {
       const Contacts = require('react-native-contacts').default;
       const allContacts = await Contacts.getAll();
@@ -93,12 +101,17 @@ export const useMediaStore = create<MediaState>((set, get) => ({
         }))
         .filter((c: any) => c.name);
       set({ contacts: formatted.sort((a: any, b: any) => a.name.localeCompare(b.name)) });
+      set({ hasLoadedContacts: true });
     } catch (e) {
       console.log('Error loading contacts', e);
+    } finally {
+      if (get().hasLoadedMedia && get().hasLoadedFiles) set({ isLoading: false });
     }
   },
 
   scanStorageFiles: async () => {
+    if (get().hasLoadedFiles) return;
+    set({ isLoading: true });
     try {
       const RNFS = require('react-native-fs');
       const rootPath = RNFS.ExternalStorageDirectoryPath;
@@ -166,12 +179,16 @@ export const useMediaStore = create<MediaState>((set, get) => ({
       if (foundDocs.length > 0) set({ documents: foundDocs });
       if (foundAudio.length > 0) set({ audio: foundAudio });
       if (foundApps.length > 0) set({ apps: foundApps });
+      set({ hasLoadedFiles: true });
     } catch (err) {
       console.log('Global scan error:', err);
+    } finally {
+      set({ isLoading: false });
     }
   },
 
   loadMedia: async () => {
+    if (get().hasLoadedMedia) return;
     const { Platform } = require('react-native');
     const { CameraRoll } = require('@react-native-camera-roll/camera-roll');
     const RNFS = require('react-native-fs');
@@ -234,21 +251,17 @@ export const useMediaStore = create<MediaState>((set, get) => ({
       );
 
       set({ photos: photosWithSize, videos: videosWithSize });
-
-      if (Platform.OS === 'android') {
-        await get().scanStorageFiles();
-      }
+      set({ hasLoadedMedia: true });
     } catch (error) {
       console.log('Error loading media:', error);
       set({ error: 'Failed to load media' });
     } finally {
-      set({ isLoading: false, hasLoaded: true });
+      set({ isLoading: false });
     }
   },
 
   checkPermissionsAndLoad: async () => {
     const { Platform, PermissionsAndroid } = require('react-native');
-    if (get().hasLoaded) return; // already loaded, skip
 
     if (Platform.OS === 'android') {
       try {
@@ -271,8 +284,7 @@ export const useMediaStore = create<MediaState>((set, get) => ({
         console.warn(err);
       }
     }
-
-    await Promise.all([get().loadMedia(), get().loadContacts()]);
+    // Note: Data loading is now lazily triggered by the UI per-tab.
   },
 
   pickAndAddDocument: async () => {

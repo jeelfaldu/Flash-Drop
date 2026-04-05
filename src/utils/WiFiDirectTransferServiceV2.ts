@@ -27,9 +27,21 @@ class WiFiDirectTransferServiceV2 {
   private _isFinalized = false;
   private currentSaveDir: string = '';
   public onStatus?: (status: DirectTransferStatusV2) => void;
+  // Track the last known receiver IP so we can reuse the P2P connection
+  public lastReceiverIp: string = '';
 
   public isRunning(): boolean {
     return this.isActive;
+  }
+
+  /**
+   * Resets only the transfer-session state (finalized flag) so a new batch
+   * of files can be sent/received over the SAME P2P Wi-Fi Direct group.
+   * Does NOT call stop() — the WiFi Direct group and TCP server remain alive.
+   */
+  public resetForNextBatch() {
+    console.log('[V2 SERVICE] resetForNextBatch: clearing finalized flag for next batch');
+    this._isFinalized = false;
   }
 
   // ── SENDER (Client) ───────────────────────────────────────────────────────
@@ -57,6 +69,7 @@ class WiFiDirectTransferServiceV2 {
   async finalizeSender(detectedIp: string, files: any[]) {
     if (this._isFinalized) return;
     this._isFinalized = true;
+    this.lastReceiverIp = detectedIp;
     
     // 💡 ROBUSTNESS: Some Androids return the wrong LAN IP, and others use randomized 
     // P2P subnets instead of the default 192.168.49.x. We test the observed and the default.
@@ -234,6 +247,8 @@ class WiFiDirectTransferServiceV2 {
                 const filesV2 = JSON.parse(status.message);
                 if (Array.isArray(filesV2)) {
                     console.log('[V2 SERVICE] Files total:', filesV2.length);
+                    // Reset so this batch can be finalized (supports "Send More" rounds)
+                    this._isFinalized = false;
                     this.finalizeReceiver(status.clientAddress || '192.168.49.X', this.currentSaveDir, filesV2);
                 }
             } catch (e) {
@@ -296,13 +311,43 @@ class WiFiDirectTransferServiceV2 {
     }
   }
 
+  /**
+   * SOFT stop — resets transfer session state (role, finalized flag, TCP server/client)
+   * but does NOT destroy the Wi-Fi Direct P2P group or terminate the physical link.
+   * Safe to call on screen init/navigation without killing the connection.
+   */
   async stop() {
+    console.log('[V2 SERVICE] stop() — soft reset (P2P group stays alive)');
     this.isActive = false;
     this._isFinalized = false;
     this.role = null;
     TransferServer.stop();
     TransferClient.stop();
+    // ⚠️ Do NOT call WiFiDirectManager.stop() here — that destroys the P2P group!
+  }
+
+  /**
+   * HARD disconnect — fully tears down the P2P group and WiFi Direct.
+   * Call this ONLY when the user explicitly chooses to disconnect
+   * (e.g. HomeScreen "Disconnect" button). Never call from screen cleanup.
+   */
+  async disconnect() {
+    console.log('[V2 SERVICE] disconnect() — hard teardown, removing P2P group');
+    this.isActive = false;
+    this._isFinalized = false;
+    this.role = null;
+    this.lastReceiverIp = '';
+    TransferServer.stop();
+    TransferClient.stop();
     await WiFiDirectManager.stop().catch(() => {});
+  }
+
+  /**
+   * Returns true if the service currently has an active P2P role
+   * (i.e. group has been set up and is still running).
+   */
+  public isP2PGroupAlive(): boolean {
+    return this.isActive;
   }
 
   private emit(status: DirectTransferStatusV2) {

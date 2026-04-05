@@ -42,7 +42,11 @@ const ReceiveScreenV2 = ({ navigation }: any) => {
     isRedirected.current = false;
     const init = async () => {
        if (Platform.OS !== 'android') return;
-       await WiFiDirectTransferServiceV2.stop();
+       // Only tear down if there is no live P2P group already
+       // (we don't want to kill the group when navigating back from FileTransferV2)
+       if (!WiFiDirectTransferServiceV2.isP2PGroupAlive()) {
+         await WiFiDirectTransferServiceV2.stop();
+       }
        setupV2ReceiverHotspot();
     };
     init();
@@ -59,6 +63,7 @@ const ReceiveScreenV2 = ({ navigation }: any) => {
   }, []);
 
   const handleManualGoBack = () => {
+      // Soft stop — does not destroy the P2P group
       WiFiDirectTransferServiceV2.stop();
       navigation.goBack();
   };
@@ -173,19 +178,18 @@ const ReceiveScreenV2 = ({ navigation }: any) => {
               </View>
 
               <View style={[styles.instructionsWrapper, { backgroundColor: '#00D1FF10' }]}>
-                <Icon name="information-outline" size={24} color="#00D1FF" />
-                <Text style={[styles.instructionText, { color: colors.text }]}>
-                  Sender should scan this QR code to join your P2P hotspot.
-                </Text>
+                <Icon name="qrcode-scan" size={28} color="#00D1FF" />
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.instructionText, { color: colors.text }]}>
+                    Ask the sender to tap <Text style={{ fontWeight: '800' }}>Scan QR</Text> on their device, then scan this code.
+                  </Text>
+                </View>
               </View>
 
-              <TouchableOpacity 
-                style={[styles.doneBtn, { backgroundColor: '#00D1FF' }]}
-                onPress={handleStartV2Transfer}
-              >
-                <Text style={styles.doneBtnText}>Waiting for sender...</Text>
-                <ActivityIndicator size="small" color="#FFF" style={{ marginLeft: 10 }} />
-              </TouchableOpacity>
+              <View style={[styles.doneBtn, { backgroundColor: '#00D1FF' }]}>
+                <ActivityIndicator size="small" color="#FFF" style={{ marginRight: 10 }} />
+                <Text style={styles.doneBtnText}>Waiting for connection...</Text>
+              </View>
             </View>
           ) : status === 'error' ? (
             <View style={styles.center}>

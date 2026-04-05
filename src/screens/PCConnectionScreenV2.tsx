@@ -29,7 +29,6 @@ import {
 } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
 import LinearGradient from 'react-native-linear-gradient';
-import QRCode from 'react-native-qrcode-svg';
 import WifiManager from 'react-native-wifi-reborn';
 import { pick, types, isErrorWithCode, errorCodes } from '@react-native-documents/picker';
 import RNFS from 'react-native-fs';
@@ -69,7 +68,6 @@ const PCConnectionScreenV2 = ({ navigation }: any) => {
   const [activeTransfers, setActiveTransfers] = useState<TransferItem[]>([]);
   const [recentTransfers, setRecentTransfers] = useState<TransferItem[]>([]);
   const [copied, setCopied] = useState(false);
-  const [showQR, setShowQR] = useState(true);
 
   const progressAnims = useRef<Record<string, Animated.Value>>({}).current;
   const scrollViewRef = useRef<ScrollView>(null);
@@ -78,8 +76,6 @@ const PCConnectionScreenV2 = ({ navigation }: any) => {
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(40)).current;
   const pulseAnim = useRef(new Animated.Value(1)).current;
-  const pulse2Anim = useRef(new Animated.Value(1)).current;
-  const qrScaleAnim = useRef(new Animated.Value(0.85)).current;
 
   const getOrCreateAnim = (id: string) => {
     if (!progressAnims[id]) progressAnims[id] = new Animated.Value(0);
@@ -96,7 +92,6 @@ const PCConnectionScreenV2 = ({ navigation }: any) => {
     Animated.parallel([
       Animated.timing(fadeAnim, { toValue: 1, duration: 500, useNativeDriver: true }),
       Animated.spring(slideAnim, { toValue: 0, friction: 8, useNativeDriver: true }),
-      Animated.spring(qrScaleAnim, { toValue: 1, friction: 7, tension: 80, useNativeDriver: true }),
     ]).start();
 
     Animated.loop(
@@ -107,9 +102,8 @@ const PCConnectionScreenV2 = ({ navigation }: any) => {
     ).start();
     Animated.loop(
       Animated.sequence([
-        Animated.delay(800),
-        Animated.timing(pulse2Anim, { toValue: 1.5, duration: 1600, useNativeDriver: true }),
-        Animated.timing(pulse2Anim, { toValue: 1, duration: 1600, useNativeDriver: true }),
+        Animated.timing(pulseAnim, { toValue: 1.5, duration: 1600, useNativeDriver: true }),
+        Animated.timing(pulseAnim, { toValue: 1, duration: 1600, useNativeDriver: true }),
       ])
     ).start();
 
@@ -120,7 +114,12 @@ const PCConnectionScreenV2 = ({ navigation }: any) => {
         setIsServerRunning(true); 
       }
       if (status.type === 'error') Alert.alert('Server Error', status.message || 'Failed to start server');
-      if (status.type === 'client_connected') { setIsClientConnected(true); HapticUtil.success(); }
+      if (status.type === 'client_connected') {
+        setIsClientConnected((prev: boolean) => {
+          if (!prev) HapticUtil.success();
+          return true;
+        });
+      }
       
       if (status.type === 'download_progress' && status.fileProgress) {
         const { name, percent, sent, total } = status.fileProgress;
@@ -270,60 +269,40 @@ const PCConnectionScreenV2 = ({ navigation }: any) => {
       <ScrollView ref={scrollViewRef} style={{ flex: 1 }} contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
         <Animated.View style={{ opacity: fadeAnim, transform: [{ translateY: slideAnim }] }}>
 
-          {/* QR / URL Card */}
-          {isServerRunning && serverUrl ? (
-            <View style={[styles.qrCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
-              {/* Toggle */}
-              <View style={styles.toggleRow}>
-                <TouchableOpacity onPress={() => setShowQR(true)} style={[styles.toggleBtn, showQR && { backgroundColor: colors.primary }]}>
-                  <Icon name="qrcode" size={15} color={showQR ? '#FFF' : colors.subtext} />
-                  <Text style={[styles.toggleText, { color: showQR ? '#FFF' : colors.subtext }]}>QR Code</Text>
-                </TouchableOpacity>
-                <TouchableOpacity onPress={() => setShowQR(false)} style={[styles.toggleBtn, !showQR && { backgroundColor: colors.primary }]}>
-                  <Icon name="link" size={15} color={!showQR ? '#FFF' : colors.subtext} />
-                  <Text style={[styles.toggleText, { color: !showQR ? '#FFF' : colors.subtext }]}>URL</Text>
-                </TouchableOpacity>
-              </View>
-
-              {showQR ? (
-                <Animated.View style={[styles.qrWrapper, { transform: [{ scale: qrScaleAnim }] }]}>
-                  <Animated.View style={[styles.pulseRing, { borderColor: colors.primary + '25', transform: [{ scale: pulseAnim }] }]} />
-                  <Animated.View style={[styles.pulseRing, styles.pulseRing2, { borderColor: colors.primary + '14', transform: [{ scale: pulse2Anim }] }]} />
-                  <View style={[styles.qrBox, { elevation: 8, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.12, shadowRadius: 10 }]}>
-                    <QRCode value={serverUrl} size={width * 0.44} color={colors.primary} backgroundColor="white" />
-                  </View>
-                </Animated.View>
-              ) : (
+          {/* URL Card */}
+          {!isClientConnected && (
+            isServerRunning && serverUrl ? (
+              <View style={[styles.qrCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
                 <View style={[styles.urlBlock, { backgroundColor: colors.primary + '0D', borderColor: colors.primary + '20' }]}>
-                  <Icon name="web" size={20} color={colors.primary} />
-                  <Text style={[styles.urlText, { color: colors.text }]} selectable numberOfLines={2}>{serverUrl}</Text>
+                  <Icon name="web" size={24} color={colors.primary} />
+                  <Text style={[styles.urlText, { color: colors.text, fontSize: 18 }]} selectable numberOfLines={2}>{serverUrl}</Text>
                 </View>
-              )}
 
-              <View style={styles.urlActions}>
-                <TouchableOpacity onPress={handleCopy} style={[styles.urlActionBtn, { backgroundColor: copied ? colors.success + '18' : colors.primary + '14', borderColor: copied ? colors.success + '35' : colors.primary + '28' }]} activeOpacity={0.8}>
-                  <Icon name={copied ? 'check' : 'content-copy'} size={16} color={copied ? colors.success : colors.primary} />
-                  <Text style={[styles.urlActionText, { color: copied ? colors.success : colors.primary }]}>{copied ? 'Copied!' : 'Copy'}</Text>
-                </TouchableOpacity>
-                <TouchableOpacity onPress={handleShare} style={[styles.urlActionBtn, { backgroundColor: colors.secondary + '14', borderColor: colors.secondary + '28' }]} activeOpacity={0.8}>
-                  <Icon name="share-variant" size={16} color={colors.secondary} />
-                  <Text style={[styles.urlActionText, { color: colors.secondary }]}>Share</Text>
-                </TouchableOpacity>
-              </View>
+                <View style={styles.urlActions}>
+                  <TouchableOpacity onPress={handleCopy} style={[styles.urlActionBtn, { backgroundColor: copied ? colors.success + '18' : colors.primary + '14', borderColor: copied ? colors.success + '35' : colors.primary + '28' }]} activeOpacity={0.8}>
+                    <Icon name={copied ? 'check' : 'content-copy'} size={16} color={copied ? colors.success : colors.primary} />
+                    <Text style={[styles.urlActionText, { color: copied ? colors.success : colors.primary }]}>{copied ? 'Copied!' : 'Copy'}</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity onPress={handleShare} style={[styles.urlActionBtn, { backgroundColor: colors.secondary + '14', borderColor: colors.secondary + '28' }]} activeOpacity={0.8}>
+                    <Icon name="share-variant" size={16} color={colors.secondary} />
+                    <Text style={[styles.urlActionText, { color: colors.secondary }]}>Share</Text>
+                  </TouchableOpacity>
+                </View>
 
-              <View style={[styles.instructionBox, { backgroundColor: colors.primary + '0A', borderColor: colors.primary + '1A' }]}>
-                <Icon name="information-outline" size={16} color={colors.primary} />
-                <Text style={[styles.instructionText, { color: colors.subtext }]}>
-                  Open this URL in any browser on your PC.{'  '}
-                  <Text style={{ fontWeight: '700', color: colors.text }}>Same WiFi required.</Text>
-                </Text>
+                <View style={[styles.instructionBox, { backgroundColor: colors.primary + '0A', borderColor: colors.primary + '1A' }]}>
+                  <Icon name="information-outline" size={16} color={colors.primary} />
+                  <Text style={[styles.instructionText, { color: colors.subtext }]}>
+                    Open this URL in any browser on your PC.{'  '}
+                    <Text style={{ fontWeight: '700', color: colors.text }}>Same WiFi required.</Text>
+                  </Text>
+                </View>
               </View>
-            </View>
-          ) : (
-            <View style={[styles.loadingCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
-              <ActivityIndicator size="large" color={colors.primary} />
-              <Text style={[styles.loadingText, { color: colors.subtext }]}>Starting server...</Text>
-            </View>
+            ) : (
+              <View style={[styles.loadingCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+                <ActivityIndicator size="large" color={colors.primary} />
+                <Text style={[styles.loadingText, { color: colors.subtext }]}>Starting server...</Text>
+              </View>
+            )
           )}
 
           {/* Shared files badge */}
@@ -358,7 +337,7 @@ const PCConnectionScreenV2 = ({ navigation }: any) => {
               <Text style={[styles.howTitle, { color: colors.text }]}>How it works</Text>
               {[
                 { icon: 'wifi', color: '#00B0FF', text: 'Connect your PC to the same WiFi as this phone.' },
-                { icon: 'qrcode-scan', color: colors.primary, text: 'Scan the QR code or type the URL in any browser.' },
+                { icon: 'nfc-search-variant', color: colors.primary, text: 'Type the URL provided above in any browser.' },
                 { icon: 'swap-horizontal', color: colors.success, text: 'Upload from PC or download files you shared from phone!' },
               ].map((item, i) => (
                 <View key={i} style={styles.stepRow}>
@@ -489,15 +468,8 @@ const styles = StyleSheet.create({
   liveText: { fontSize: 11, fontWeight: '800', color: '#00E676', letterSpacing: 1 },
   scrollContent: { paddingHorizontal: 16, paddingBottom: 40 },
   qrCard: { borderRadius: 24, padding: 20, borderWidth: 1, marginBottom: 14 },
-  toggleRow: { flexDirection: 'row', marginBottom: 18, gap: 8 },
-  toggleBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 16, paddingVertical: 9, borderRadius: 12 },
-  toggleText: { fontSize: 13, fontWeight: '700' },
-  qrWrapper: { alignItems: 'center', marginBottom: 16, height: width * 0.58, justifyContent: 'center' },
-  pulseRing: { position: 'absolute', width: width * 0.52, height: width * 0.52, borderRadius: width * 0.26, borderWidth: 1.5 },
-  pulseRing2: { width: width * 0.65, height: width * 0.65, borderRadius: width * 0.325 },
-  qrBox: { padding: 14, borderRadius: 20, backgroundColor: '#FFF' },
-  urlBlock: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 16, borderRadius: 14, marginBottom: 16, borderWidth: 1 },
-  urlText: { flex: 1, fontSize: 14, fontWeight: '700', lineHeight: 20 },
+  urlBlock: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 20, borderRadius: 16, marginBottom: 18, borderWidth: 1 },
+  urlText: { flex: 1, fontWeight: '700', lineHeight: 22 },
   urlActions: { flexDirection: 'row', gap: 10, marginBottom: 14 },
   urlActionBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, paddingVertical: 11, borderRadius: 14, borderWidth: 1 },
   urlActionText: { fontSize: 14, fontWeight: '700' },

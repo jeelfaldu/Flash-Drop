@@ -12,6 +12,7 @@ import {
   Dimensions,
   Platform,
   FlatList,
+  Linking,
 } from 'react-native';
 import { Camera, useCameraDevice, useCodeScanner } from 'react-native-vision-camera';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
@@ -28,7 +29,7 @@ import { DisplayAds, ProdIDs } from '../utils/Constant';
 const { width } = Dimensions.get('window');
 
 const SharingScreenV2 = ({ route, navigation }: any) => {
-  const { items = [] } = route.params || {};
+  const { items = [], reuseP2pIp } = route.params || {};
   const { colors, typography, layout, isDark } = useTheme();
   
   const [mode, setMode] = useState<'radar' | 'qr'>('radar');
@@ -44,18 +45,29 @@ const SharingScreenV2 = ({ route, navigation }: any) => {
   useEffect(() => {
     const init = async () => {
        if (Platform.OS !== 'android') return;
-       await WiFiDirectTransferServiceV2.stop();
-       startV2Sender();
-       const status = await Camera.requestCameraPermission();
-       setHasPermission(status === 'granted');
+
+       if (reuseP2pIp) {
+         // ── REUSE MODE: P2P group is alive, just reset + resend ────────────
+         console.log('[SHARING SCREEN V2] Reuse mode — skipping stop/discovery, sending directly to', reuseP2pIp);
+         WiFiDirectTransferServiceV2.resetForNextBatch();
+         startV2SenderReuse(reuseP2pIp);
+       } else {
+         // Only do a full soft-stop if no group is currently alive
+         if (!WiFiDirectTransferServiceV2.isP2PGroupAlive()) {
+           await WiFiDirectTransferServiceV2.stop();
+         }
+         startV2Sender();
+         const status = await Camera.requestCameraPermission();
+         setHasPermission(status === 'granted');
+       }
     };
     init();
 
     let retryTimer: any;
-    if (mode === 'radar') {
+    if (!reuseP2pIp && mode === 'radar') {
       retryTimer = setTimeout(() => {
         setShowRetry(true);
-      }, 6000);
+      }, 15000);
     }
 
     const backHandler = BackHandler.addEventListener('hardwareBackPress', () => {
@@ -68,7 +80,7 @@ const SharingScreenV2 = ({ route, navigation }: any) => {
       if (retryTimer) clearTimeout(retryTimer);
       // Notice: No automatic stop() here to prevent accidental disconnections on screen replacement.
     };
-  }, [mode]);
+  }, [mode, reuseP2pIp]);
 
   const handleRetry = async () => {
     setShowRetry(false);
@@ -79,10 +91,11 @@ const SharingScreenV2 = ({ route, navigation }: any) => {
     // Restart timer
     setTimeout(() => {
       if (devices.length === 0) setShowRetry(true);
-    }, 6000);
+    }, 15000);
   };
 
   const handleManualGoBack = () => {
+      // Soft stop only — does not destroy the P2P group
       WiFiDirectTransferServiceV2.stop();
       navigation.goBack();
   };
@@ -119,6 +132,37 @@ const SharingScreenV2 = ({ route, navigation }: any) => {
     WiFiDirectTransferServiceV2.startSender(items, (peers) => {
         setDevices(peers);
     });
+  };
+
+  /**
+   * Reuse mode: P2P group is already alive. Skip discovery, go straight to
+   * finalizeSender with the known receiver IP.
+   */
+  const startV2SenderReuse = (existingIp: string) => {
+    setConnectionStatus('connecting');
+    setConnectionLog(`Resending to receiver...`);
+    isFinalizing.current = true;
+
+    WiFiDirectTransferServiceV2.onStatus = (status: DirectTransferStatusV2) => {
+      console.log('[SHARING SCREEN V2 REUSE] Event:', status.type);
+      if (status.type === 'error') {
+        Alert.alert('Transfer Error', status.message);
+        setConnectionStatus('error');
+        setConnectionLog(status.message);
+        isFinalizing.current = false;
+      } else if (status.type === 'ready') {
+        HapticUtil.success();
+        navigation.replace('FileTransferV2', {
+          role: 'sender',
+          deviceName: 'Receiver V2',
+          initialFiles: items,
+          ip: existingIp,
+          reuseConnection: true,
+        });
+      }
+    };
+
+    WiFiDirectTransferServiceV2.finalizeSender(existingIp, items);
   };
 
 
@@ -205,16 +249,20 @@ const SharingScreenV2 = ({ route, navigation }: any) => {
               ListEmptyComponent={
                 <View style={{ alignItems: 'center', marginTop: 40 }}>
                   {!showRetry ? (
-                    <Text style={{ color: colors.subtext }}>Looking for peers...</Text>
+                    <>
+                      <Text style={{ color: colors.subtext, fontWeight: '600' }}>Looking for peers...</Text>
+                      <Text style={{ color: colors.subtext, fontSize: 12, marginTop: 4, opacity: 0.6 }}>Ensure the receiver is on the Receive screen.</Text>
+                    </>
                   ) : (
                     <View style={{ alignItems: 'center' }}>
-                      <Text style={{ color: colors.subtext, marginBottom: 15 }}>No devices found yet</Text>
+                      <Text style={{ color: colors.subtext, marginBottom: 15, textAlign: 'center' }}>Taking longer than usual...{'\n'}Make sure the receiver device is waiting.</Text>
                       <TouchableOpacity 
                         style={[styles.retryBtn, { backgroundColor: colors.primary }]}
                         onPress={handleRetry}
+                        activeOpacity={0.8}
                       >
                         <Icon name="refresh" size={20} color="#FFF" style={{ marginRight: 8 }} />
-                        <Text style={{ color: '#FFF', fontWeight: '700' }}>Retry Search</Text>
+                        <Text style={{ color: '#FFF', fontWeight: '800' }}>Refresh Search</Text>
                       </TouchableOpacity>
                     </View>
                   )}
@@ -231,9 +279,37 @@ const SharingScreenV2 = ({ route, navigation }: any) => {
                       <View style={styles.scanLine} />
                    </View>
                 ) : (
-                   <Text style={{ color: colors.error, textAlign: 'center' }}>Scanner requires Camera permission</Text>
+                   <View style={{ alignItems: 'center', paddingHorizontal: 20, marginVertical: 35 }}>
+                     <Icon name="camera-off" size={48} color={colors.subtext} style={{ marginBottom: 15 }} />
+                     <Text style={{ color: colors.text, fontSize: 18, textAlign: 'center', fontWeight: '800' }}>Camera Access Required</Text>
+                     <Text style={{ color: colors.subtext, fontSize: 14, textAlign: 'center', marginTop: 8, marginBottom: 24, lineHeight: 20 }}>
+                       Permission to use the camera is required to scan QR codes and pair devices.
+                     </Text>
+                     <TouchableOpacity 
+                       style={{ backgroundColor: colors.primary, paddingHorizontal: 24, paddingVertical: 12, borderRadius: 30, elevation: 3, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.2, shadowRadius: 4 }}
+                       onPress={async () => {
+                          const status = await Camera.requestCameraPermission();
+                          if (status === 'granted') setHasPermission(true);
+                          else {
+                             if (Platform.OS === 'android') {
+                               Linking.openSettings();
+                             } else {
+                               Linking.openURL('app-settings:');
+                             }
+                          }
+                       }}
+                       activeOpacity={0.8}
+                     >
+                       <Text style={{ color: '#FFF', fontWeight: '800', fontSize: 15 }}>Grant Permission</Text>
+                     </TouchableOpacity>
+                   </View>
                 )}
-                <Text style={{ marginTop: 20, color: colors.text, fontWeight: '700' }}>Scan Receiver's QR</Text>
+                <View style={{ marginTop: 35, alignItems: 'center' }}>
+                  <Text style={{ color: colors.text, fontSize: 18, fontWeight: '800' }}>Scan Receiver QR</Text>
+                  <Text style={{ color: colors.subtext, fontSize: 14, textAlign: 'center', marginTop: 10, paddingHorizontal: 30, lineHeight: 20 }}>
+                    Point your camera at the QR code displayed on the receiving device to pair instantly.
+                  </Text>
+                </View>
              </View>
           </View>
         )}
@@ -241,8 +317,10 @@ const SharingScreenV2 = ({ route, navigation }: any) => {
 
       {connectionStatus === 'connecting' && (
         <View style={styles.overlay}>
-           <ActivityIndicator size="large" color="#FF9F43" />
-           <Text style={{ color: '#FFF', marginTop: 20, fontWeight: '700' }}>{connectionLog}</Text>
+           <View style={{ backgroundColor: 'rgba(30, 30, 30, 0.95)', padding: 30, borderRadius: 24, alignItems: 'center', maxWidth: width * 0.8 }}>
+             <ActivityIndicator size="large" color="#FF9F43" />
+             <Text style={{ color: '#FFF', marginTop: 20, fontSize: 16, fontWeight: '700', textAlign: 'center', lineHeight: 24 }}>{connectionLog}</Text>
+           </View>
         </View>
       )}
 

@@ -48,6 +48,12 @@ const SendScreen = ({ navigation, route }: any) => {
     contacts,
     apps,
     isLoading,
+    hasLoadedMedia,
+    hasLoadedContacts,
+    hasLoadedFiles,
+    loadMedia,
+    loadContacts,
+    scanStorageFiles,
     checkPermissionsAndLoad,
     pickAndAddDocument,
   } = useMediaStore();
@@ -59,10 +65,21 @@ const SendScreen = ({ navigation, route }: any) => {
   const footerSlideAnim = useRef(new Animated.Value(100)).current;
   const wasEmpty = useRef(true);
 
-  // On mount: permissions + media load handled entirely by the store
+  // On mount: fetch permissions
   useEffect(() => {
     checkPermissionsAndLoad();
-  }, []);
+  }, [checkPermissionsAndLoad]);
+
+  // Lazy load media based on the active tab
+  useEffect(() => {
+    if (activeTab === 'photos' || activeTab === 'videos') {
+      if (!hasLoadedMedia) loadMedia();
+    } else if (activeTab === 'contacts') {
+      if (!hasLoadedContacts) loadContacts();
+    } else if (activeTab === 'files') {
+      if (!hasLoadedFiles) scanStorageFiles();
+    }
+  }, [activeTab, hasLoadedMedia, hasLoadedContacts, hasLoadedFiles, loadMedia, loadContacts, scanStorageFiles]);
 
   // Spring up footer when first item is selected, slide down when cleared
   useEffect(() => {
@@ -111,6 +128,16 @@ const SendScreen = ({ navigation, route }: any) => {
     HapticUtil.medium();
     
     console.log(`[SendScreen] Send click triggered! Files selected: ${selectedItems.length}`);
+
+    const reuseP2pIp: string | undefined = route.params?.reuseP2pIp;
+
+    // ── Send More flow: reuse existing P2P connection ──────────────────────
+    if (reuseP2pIp) {
+      console.log(`[SendScreen] reuseP2pIp=${reuseP2pIp} — routing to SharingV2 in reuse mode`);
+      navigation.navigate('SharingV2', { items: selectedItems, reuseP2pIp });
+      setTimeout(() => clearSelection(), 500);
+      return;
+    }
     
     const { role: activeRole } = useTransferStore.getState();
 
