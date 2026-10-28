@@ -1,4 +1,7 @@
 buildscript {
+    org.gradle.api.artifacts.dsl.RepositoryHandler.metaClass.jcenter = {
+        mavenCentral()
+    }
     ext {
         buildToolsVersion = "36.0.0"
         minSdkVersion = 24
