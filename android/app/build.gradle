@@ -25,7 +25,10 @@ react {
 
     /* Bundling */
     //   A list containing the node command and its flags. Default is just 'node'.
-    nodeExecutableAndArgs = ["/Users/jeel/.nvm/versions/node/v20.19.4/bin/node"]
+    def customNode = "/Users/jeel/.nvm/versions/node/v20.19.4/bin/node"
+    if (file(customNode).exists()) {
+        nodeExecutableAndArgs = [customNode]
+    }
     //
     //   The command to run when bundling. By default is 'bundle'
     // bundleCommand = "ram-bundle"
@@ -82,8 +85,8 @@ android {
         applicationId "com.spark.flashdrop"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 5
-        versionName "1.1.3"
+        versionCode 8
+        versionName "1.1.6"
     }
     signingConfigs {
         debug {
